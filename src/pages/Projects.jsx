@@ -11,7 +11,7 @@ const PROJECT_TYPES = [
   { value: 'other', label: 'Other' },
 ]
 
-const STATUSES = ['enquiry', 'quoted', 'instructed', 'in_progress', 'complete', 'on_hold', 'lost']
+const STATUSES = ['enquiry', 'quoted', 'instructed', 'in_progress', 'invoiced', 'complete', 'on_hold', 'lost']
 
 const EMPTY_FORM = {
   ref: '', client_name: '', address_line1: '', address_line2: '',
