@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 
-const STATUS_ORDER = ['enquiry', 'quoted', 'instructed', 'in_progress', 'complete', 'on_hold']
+const STATUS_ORDER = ['enquiry', 'quoted', 'instructed', 'in_progress', 'complete', 'on_hold', 'lost']
 
 export default function Dashboard({ onNavigate }) {
   const [projects, setProjects] = useState([])
