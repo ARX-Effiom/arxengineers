@@ -1,6 +1,2 @@
-[build]
-builder = "NIXPACKS"
-buildCommand = "npm ci && npx vite build"
-
 [deploy]
 startCommand = "npx serve dist -p ${PORT:-4173} -s"
