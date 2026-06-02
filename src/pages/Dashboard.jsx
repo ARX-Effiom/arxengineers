@@ -19,16 +19,17 @@ export default function Dashboard({ onNavigate }) {
     })
   }, [])
 
-  const active = projects.filter(p => !['complete', 'on_hold'].includes(p.status))
-  const totalFees = projects.reduce((s, p) => s + (p.fee || 0), 0)
+  const active = projects.filter(p => !['complete', 'on_hold', 'lost'].includes(p.status))
+  const completedFees = projects.filter(p => p.status === 'complete').reduce((s, p) => s + (p.fee || 0), 0)
   const unpaidInvoices = invoices.filter(i => !i.paid)
   const outstanding = unpaidInvoices.reduce((s, i) => s + (i.amount || 0), 0)
+  const totalInvoiced = invoices.reduce((s, i) => s + (i.amount || 0), 0)
   const recentProjects = projects.slice(0, 5)
 
   const statCards = [
     { label: 'Active Projects', value: active.length, color: 'var(--purple)', icon: '📁' },
-    { label: 'Total Projects', value: projects.length, color: 'var(--info)', icon: '📊' },
-    { label: 'Total Fees Quoted', value: `£${totalFees.toLocaleString()}`, color: 'var(--success)', icon: '💷' },
+    { label: 'Completed (fees)', value: `£${completedFees.toLocaleString()}`, color: 'var(--success)', icon: '✅' },
+    { label: 'Total Invoiced', value: `£${totalInvoiced.toLocaleString()}`, color: 'var(--info)', icon: '🧾' },
     { label: 'Outstanding', value: `£${outstanding.toLocaleString()}`, color: outstanding > 0 ? 'var(--warning)' : 'var(--success)', icon: '⏳' },
   ]
 
