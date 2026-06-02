@@ -106,6 +106,7 @@ label {
 .badge-complete { background: #F3F4F6; color: #374151; }
 .badge-on_hold { background: #FEE2E2; color: #991B1B; }
 .badge-lost { background: #1f2937; color: #f9fafb; }
+.badge-invoiced { background: #FEF9C3; color: #854D0E; }
 
 .tag { background: var(--purple-bg); color: var(--purple); }
 
