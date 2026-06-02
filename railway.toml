@@ -1,2 +1,2 @@
 [deploy]
-startCommand = "npx serve dist -p ${PORT:-4173} -s"
+startCommand = "npx serve -s dist"
