@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 
-const STATUS_ORDER = ['enquiry', 'quoted', 'instructed', 'in_progress', 'complete', 'on_hold', 'lost']
+const STATUS_ORDER = ['enquiry', 'quoted', 'instructed', 'in_progress', 'invoiced', 'complete', 'on_hold', 'lost']
 
 export default function Dashboard({ onNavigate }) {
   const [projects, setProjects] = useState([])
@@ -21,16 +21,14 @@ export default function Dashboard({ onNavigate }) {
 
   const active = projects.filter(p => !['complete', 'on_hold', 'lost'].includes(p.status))
   const completedFees = projects.filter(p => p.status === 'complete').reduce((s, p) => s + (p.fee || 0), 0)
-  const unpaidInvoices = invoices.filter(i => !i.paid)
-  const outstanding = unpaidInvoices.reduce((s, i) => s + (i.amount || 0), 0)
-  const totalInvoiced = invoices.reduce((s, i) => s + (i.amount || 0), 0)
+  const awaitingPayment = projects.filter(p => p.status === 'invoiced').reduce((s, p) => s + (p.fee || 0), 0)
   const recentProjects = projects.slice(0, 5)
 
   const statCards = [
     { label: 'Active Projects', value: active.length, color: 'var(--purple)', icon: '📁' },
     { label: 'Completed (fees)', value: `£${completedFees.toLocaleString()}`, color: 'var(--success)', icon: '✅' },
-    { label: 'Total Invoiced', value: `£${totalInvoiced.toLocaleString()}`, color: 'var(--info)', icon: '🧾' },
-    { label: 'Outstanding', value: `£${outstanding.toLocaleString()}`, color: outstanding > 0 ? 'var(--warning)' : 'var(--success)', icon: '⏳' },
+    { label: 'Awaiting Payment', value: `£${awaitingPayment.toLocaleString()}`, color: awaitingPayment > 0 ? 'var(--warning)' : 'var(--text-muted)', icon: '⏳' },
+    { label: 'Total Projects', value: projects.length, color: 'var(--info)', icon: '📊' },
   ]
 
   if (loading) return (
