@@ -94,7 +94,7 @@ export async function generateInvoiceDocx({ project, invoiceType, amount, invoic
         new Paragraph({
           alignment: AlignmentType.RIGHT,
           spacing: { before: 0, after: 20 },
-          children: [new TextRun({ text: 'effiom@arxengineers.co.uk  |  www.arxengineers.co.uk', font: 'Arial', size: 16, color: '666666' })]
+          children: [new TextRun({ text: 'admin@arxengineers.co.uk  |  www.arxengineers.co.uk', font: 'Arial', size: 16, color: '666666' })]
         }),
         new Paragraph({
           alignment: AlignmentType.RIGHT,
@@ -208,7 +208,7 @@ export async function generateInvoiceDocx({ project, invoiceType, amount, invoic
 
         // Footer terms
         para(
-          'Payment is due within 14 days of invoice. Monies not paid within that period shall attract interest in accordance with The Late Payment of Commercial Debts (Interest) Act 1998. ARX Engineers Ltd is registered in England & Wales, Company No. 16198467.',
+          'Payment is due within 28 days of invoice. Monies not paid within that period shall attract interest in accordance with The Late Payment of Commercial Debts (Interest) Act 1998. ARX Engineers Ltd is registered in England & Wales, Company No. 16198467.',
           { size: 16, color: '888888', spaceBefore: 80 }
         ),
       ]
