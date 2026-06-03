@@ -38,7 +38,7 @@ export default function Comms() {
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState(null)
   const [copied, setCopied] = useState(false)
-  const [apiKey] = useState(() => localStorage.getItem('arx_api_key') || '')
+
   const [history, setHistory] = useState([])
 
   const selectedType = COMMS_TYPES.find(t => t.value === commsType)
@@ -81,7 +81,6 @@ ${SIGNATURE}`
 
   const handleGenerate = async () => {
     if (!brief.trim()) return setError('Please describe what you need')
-    if (!apiKey) return setError('API key required — add it in Quote Generator tab')
     setGenerating(true)
     setError(null)
     setOutput('')
@@ -89,9 +88,9 @@ ${SIGNATURE}`
     const { systemPrompt, userPrompt } = buildPrompt()
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const response = await fetch('/api/claude', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: 'claude-sonnet-4-6',
           max_tokens: 1500,
