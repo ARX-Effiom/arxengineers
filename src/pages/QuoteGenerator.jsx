@@ -62,7 +62,8 @@ export default function QuoteGenerator() {
       if (!response.ok) throw new Error(data.error?.message || 'API error')
 
       const text = data.content[0]?.text || ''
-      const json = JSON.parse(text)
+      const clean = text.replace(/```json\n?/g, '').replace(/```/g, '').trim()
+      const json = JSON.parse(clean)
       setQuoteData(json)
     } catch (e) {
       setError(`Failed: ${e.message}`)
