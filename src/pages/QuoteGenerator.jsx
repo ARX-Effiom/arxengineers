@@ -31,8 +31,7 @@ export default function QuoteGenerator() {
   const [quoteData, setQuoteData] = useState(null)
   const [error, setError] = useState(null)
   const [saved, setSaved] = useState(false)
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('arx_api_key') || '')
-  const [showKeyInput, setShowKeyInput] = useState(false)
+
 
   useEffect(() => {
     supabase.from('projects').select('id, ref, client_name, address_line1, postcode, project_type, description')
@@ -42,16 +41,15 @@ export default function QuoteGenerator() {
 
   const handleGenerate = async () => {
     if (!brief.trim()) return setError('Please describe the project')
-    if (!apiKey) { setShowKeyInput(true); return setError('API key required') }
     setGenerating(true)
     setError(null)
     setQuoteData(null)
     setSaved(false)
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const response = await fetch('/api/claude', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: 'claude-sonnet-4-6',
           max_tokens: 1500,
@@ -102,12 +100,6 @@ export default function QuoteGenerator() {
     }
   }
 
-  const saveKey = () => {
-    localStorage.setItem('arx_api_key', apiKey)
-    setShowKeyInput(false)
-    setError(null)
-  }
-
   return (
     <div style={{ padding: 32 }}>
       <div style={{ marginBottom: 24 }}>
@@ -118,28 +110,6 @@ export default function QuoteGenerator() {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
         {/* Left: Input */}
         <div>
-          {/* API Key */}
-          <div className="card" style={{ padding: 20, marginBottom: 20 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: showKeyInput ? 12 : 0 }}>
-              <div>
-                <div style={{ fontWeight: 600, fontSize: 14 }}>Anthropic API Key</div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                  {apiKey ? '✓ Key saved locally' : 'Required to generate quotes'}
-                </div>
-              </div>
-              <button className="btn-secondary btn-sm" onClick={() => setShowKeyInput(!showKeyInput)}>
-                {showKeyInput ? 'Cancel' : apiKey ? 'Update' : 'Add Key'}
-              </button>
-            </div>
-            {showKeyInput && (
-              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-                <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)}
-                  placeholder="sk-ant-..." style={{ flex: 1 }} />
-                <button className="btn-primary" onClick={saveKey}>Save</button>
-              </div>
-            )}
-          </div>
-
           {/* Link to project */}
           <div style={{ marginBottom: 16 }}>
             <label>Link to Project (optional)</label>
