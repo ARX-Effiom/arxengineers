@@ -1,306 +1,354 @@
 import {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   AlignmentType, BorderStyle, WidthType, ShadingType, PageOrientation,
-  UnderlineType, LevelFormat, HeadingLevel
+  UnderlineType, TabStopType, TabStopPosition
 } from 'docx'
 
 const PURPLE = '5B2D8E'
 const GREY = '888888'
 const LIGHT_GREY = 'F5F5F5'
+const MID_GREY = 'CCCCCC'
 const WHITE = 'FFFFFF'
+const BLACK = '1A1A1A'
 const FONT = 'Arial'
 
-const noBorder = { style: BorderStyle.NONE, size: 0, color: WHITE }
-const noBorders = { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder }
+const A4P = { width: 11906, height: 16838 }
+const MARGIN = { top: 1440, right: 1440, bottom: 1440, left: 1440 }
+const CONTENT_WIDTH = 9026
 
-// ── Paragraph helpers ──────────────────────────────────────────
-const p = (text, opts = {}) => new Paragraph({
+const noBorder = { style: BorderStyle.NONE, size: 0, color: WHITE }
+const noBorders = { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder, insideH: noBorder, insideV: noBorder }
+
+// ── Helpers ────────────────────────────────────────────────────
+const run = (text, opts = {}) => new TextRun({
+  text, font: FONT,
+  size: opts.size || 22,
+  bold: opts.bold || false,
+  italics: opts.italic || false,
+  color: opts.color || BLACK,
+  underline: opts.underline ? { type: UnderlineType.SINGLE } : undefined,
+  break: opts.break || undefined,
+})
+
+const para = (children, opts = {}) => new Paragraph({
   alignment: opts.align || AlignmentType.LEFT,
   spacing: { before: opts.before || 0, after: opts.after || 60 },
-  border: opts.borderBottom ? { bottom: { style: BorderStyle.SINGLE, size: 6, color: PURPLE, space: 4 } } : undefined,
-  children: [new TextRun({
-    text: text || '',
-    font: FONT,
-    size: opts.size || 22,
-    bold: opts.bold || false,
-    italics: opts.italic || false,
-    color: opts.color || '000000',
-    underline: opts.underline ? { type: UnderlineType.SINGLE } : undefined,
-  })]
+  border: opts.borderBottom ? { bottom: { style: BorderStyle.SINGLE, size: opts.borderSize || 6, color: opts.borderColor || PURPLE, space: 4 } } : undefined,
+  children: Array.isArray(children) ? children : [children],
 })
 
-const spacer = (lines = 1) => Array.from({ length: lines }, () =>
-  new Paragraph({ spacing: { before: 0, after: 0 }, children: [new TextRun({ text: '', font: FONT, size: 22 })] })
+const tp = (text, opts = {}) => para([run(text, opts)], opts)
+
+const sp = (n = 1) => Array.from({ length: n }, () => para([run('')], { after: 0 }))
+
+const headingPara = (text, size = 24) => para(
+  [run(text, { bold: true, color: PURPLE, size })],
+  { borderBottom: true, borderSize: 8, borderColor: PURPLE, before: 240, after: 120 }
 )
 
-const sectionHeading = (text) => new Paragraph({
-  spacing: { before: 200, after: 100 },
-  border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: PURPLE, space: 4 } },
-  children: [new TextRun({ text, font: FONT, size: 22, bold: true, color: PURPLE })]
-})
-
-const bulletItem = (text) => new Paragraph({
-  spacing: { before: 20, after: 20 },
-  indent: { left: 320, hanging: 200 },
+const bullet = (text, opts = {}) => new Paragraph({
+  spacing: { before: opts.before || 40, after: opts.after || 40 },
+  indent: { left: 360, hanging: 240 },
   children: [
-    new TextRun({ text: '•\t', font: FONT, size: 16, color: PURPLE }),
-    new TextRun({ text, font: FONT, size: 16 }),
+    run('·\t', { color: PURPLE, size: opts.size || 20 }),
+    run(text, { size: opts.size || 20 }),
   ]
 })
 
-const tcItem = (num, text) => new Paragraph({
-  spacing: { before: 40, after: 40 },
-  indent: { left: 380, hanging: 380 },
-  children: [
-    new TextRun({ text: `${num}.\t`, font: FONT, size: 16, bold: true }),
-    new TextRun({ text, font: FONT, size: 16 }),
-  ]
+const dashLine = (text) => new Paragraph({
+  spacing: { before: 60, after: 60 },
+  indent: { left: 360 },
+  children: [run('—\t', { color: PURPLE }), run(text)],
 })
 
-const pageBreak = () => new Paragraph({
-  children: [new TextRun({ text: '', break: 1 })]
+const tcClause = (num, text) => new Paragraph({
+  spacing: { before: 60, after: 60 },
+  indent: { left: 500, hanging: 500 },
+  children: [run(`${num}.\t`, { bold: true }), run(text, { size: 20 })],
 })
 
-// ── Standard content ─────────────────────────────────────────
-const ASSUMPTIONS = [
-  'No allowance has been made for temporary works (propping, shoring, needling) which shall be designed and implemented by the appointed contractor.',
-  'No allowance has been made for the design of staircase, below-ground drainage or external works unless specifically stated in the scope above.',
-  'Setting out of all works is the responsibility of the architect / designer or main contractor.',
-  'The existing structure, foundations and ground conditions are assumed to be adequate and competent. No intrusive investigation or trial pits are included unless stated.',
-  'No Party Wall negotiations or discussions are included within this fee unless stated.',
-  'No allowance has been made for value engineering or redesign required as a result of contractor input or procurement.',
-  'All documents will be issued in PDF format. Any changes required after issue will be subject to additional fees at the hourly rate.',
-  'No responsibility is accepted for non-structural items including waterproofing, glazing, fire protection or rooflights.',
-  'Building Control approval is the responsibility of the client.',
+const divider = (color = MID_GREY) => para([run('')], {
+  after: 0, borderBottom: true, borderSize: 4, borderColor: color
+})
+
+// ── STANDARD TEXT BLOCKS ────────────────────────────────────────
+const PERSONAL_LETTER = (clientFirstName, projectDesc) => [
+  tp(`Dear ${clientFirstName || 'Client'},`, { after: 120 }),
+  tp(`Thank you for considering ARX for the structural engineering of your ${projectDesc}. It is a project I am looking forward to being part of, and I wanted to take a moment — before we get into the technical detail — to speak to you directly.`, { after: 120 }),
+  tp(`At ARX, we believe that structural engineering done well is largely invisible. What you should see is your home transformed, your vision realised, and your build progressing without surprises. What you should feel, throughout, is that you have a trusted partner in your corner — someone who is as invested in the outcome as you are.`, { after: 120 }),
+  tp(`I have been working in structural engineering since 2017, and ARX was founded on a single conviction: that every client — whether a homeowner making the most significant investment of their life, an architect delivering for their client, or a contractor building to programme — deserves the same thing. Not just competent engineering, but a genuinely exceptional experience.`, { after: 120 }),
+  tp(`The proposal that follows sets out our scope, our fee, and the terms under which we work. I hope it gives you confidence not just in the numbers, but in the practice behind them.`, { after: 120 }),
+  tp(`If you have any questions at all — about the scope, the process, or anything else — please do not hesitate to get in touch before signing. I would rather answer a question now than have any uncertainty remain.`, { after: 200 }),
+  tp('Yours sincerely,', { after: 60 }),
+  tp('ARX Engineers', { bold: true, after: 20 }),
+  tp('Aim For Excellence', { italic: true, color: PURPLE }),
+]
+
+const COMMITMENT_SECTION = [
+  headingPara('OUR COMMITMENT TO YOU'),
+  tp(`ARX was built around one idea: that the people who trust us with their projects deserve more than calculations and drawings. They deserve a structural engineer who communicates clearly, delivers on time, and treats their project with the same care they would.`, { after: 120 }),
+  tp(`With nearly a decade of experience across residential, commercial, and mixed-use projects, we bring the rigour of a large practice and the personal attention of a dedicated partner. Every project that leaves ARX has been considered, checked, and crafted to the standard we put our name to.`),
+]
+
+const WHAT_HAPPENS_NEXT = (includeSiteVisit) => [
+  headingPara('WHAT HAPPENS NEXT'),
+  tp('01  Appointment', { bold: true, color: PURPLE, after: 40 }),
+  tp('Return your signed acceptance whereupon we will prepare a payable deposit. We will confirm receipt within one working day and open your project file.', { after: 120 }),
+  ...(includeSiteVisit ? [
+    tp('02  Site & Survey', { bold: true, color: PURPLE, after: 40 }),
+    tp('We will coordinate a convenient time for your site visit. We may issue a trial pit sketch in advance if required so a contractor can prepare.', { after: 120 }),
+    tp('03  Design & Calculations', { bold: true, color: PURPLE, after: 40 }),
+  ] : [
+    tp('02  Design & Calculations', { bold: true, color: PURPLE, after: 40 }),
+  ]),
+  tp('We will produce your structural calculations and general arrangement drawings. Upon settlement of the outstanding balance, the calculations will be issued in PDF format, ready to submit to Building Control.', { after: 120 }),
+  tp(`${includeSiteVisit ? '04' : '03'}  Construction Support`, { bold: true, color: PURPLE, after: 40 }),
+  tp('We remain available throughout the build. Any site queries, contractor RFIs, or Building Control responses are handled promptly — your build does not stop because of us.'),
+]
+
+const HOW_WE_WORK = [
+  headingPara('HOW WE WORK TOGETHER'),
+  tp('A successful project is a shared effort. To deliver our best work for you, we ask that we work as genuine partners — each taking responsibility for our part. Here is what that looks like in practice:', { after: 120 }),
+  dashLine('We will communicate proactively — you will never need to chase us for an update.'),
+  dashLine('We ask that key decisions and any changes to the architectural intent are confirmed in writing, so the project record is always clear.'),
+  dashLine('Our designs are based on the information provided. Where site conditions differ from what is assumed, we will advise you promptly and agree a way forward.'),
+  dashLine('Building Control approval and contractor setting-out remain the responsibility of the relevant parties — we are here to support, not to duplicate their role.'),
+  dashLine('If anything is unclear at any stage, please ask. We would always rather take five minutes to explain than have uncertainty affect your project.'),
+]
+
+const BUILDING_REGS = [
+  headingPara('BUILDING REGULATION COMPLIANCE'),
+  tp(`The Building Safety Act requires all aspects of the works to be compliant with the Building Regulations Approved Documents. Including but not limited to: Fire Safety, Conservation of Fuel & Power, Access, Ventilation, Overheating, Protection from Falling, Collisions & Impacts, Security, Resistance To Sound etc.`, { after: 120 }),
+  tp(`It is the responsibility of the Client, the Main Contractor or other professionals to ensure this is satisfied as this is outside of our expertise and the remit extended to ARX Engineers.`),
+]
+
+const SCOPE_ASSUMPTIONS = [
+  headingPara('SCOPE ASSUMPTIONS & EXCLUSIONS'),
+  bullet('We will not be responsible for the design of non-structural items such as waterproofing, roof lights or door glazing, nor are we responsible for the structural design of the glass structure or fire proofing/protection of structural elements.'),
+  bullet('A trial pit requirement sketch may be issued upon appointment. These pits should be ready to inspect prior to site visit.'),
+  bullet('Quotation does not allow for foundations subject to influence of trees.'),
+  bullet('It is the responsibility of the client to ensure building control approval is obtained prior to commencement of construction works or ordering of materials.'),
+  bullet('Our fee does not allow time for works as a result of Party Wall negotiations or discussions.'),
+  bullet('Our fee does not allow for value engineering process, or changes that will result in our structure being redesigned or reassessed. This includes any input from the contractor during the construction stage.'),
+  bullet('Temporary works such as props, struts or needling will be contractor designed.'),
+  bullet('All setting out will be the architect\'s responsibility. The contractor must take their own site dimensions to confirm lengths for fabrication.'),
+  bullet('Any existing structure that may be present is assumed to be of a good structural condition. Our quote does not allow for any remedial or repair works unless stated above.'),
+  bullet('This quote does not include for staircase design, below-ground drainage or external works unless stated otherwise.'),
+  bullet('Meetings and/or site visits will be charged at hourly rates, unless agreed otherwise.'),
+  bullet('Professional Indemnity Insurance (PI) for the above scope is limited to 20 times our fee stated above.'),
+  bullet('Building regulations calculations will be issued upon payment of invoice.'),
+  bullet('The fee proposal is valid for 3 months.'),
+  bullet('All documentation will be issued in PDF format. If paper copies are required, they will be charged at cost plus £20 admin fee per set.'),
 ]
 
 const TC_CLAUSES = [
-  'All fees are exclusive of VAT. ARX Engineers Ltd is not currently VAT registered.',
-  'A deposit of 20% of the agreed fee is payable on instruction. The balance is payable prior to issue of final calculations and drawings.',
-  'Payment is due within 28 days of invoice. Interest will be charged on late payments in accordance with The Late Payment of Commercial Debts (Interest) Act 1998.',
-  'Copyright of all documents, drawings and calculations remains with ARX Engineers Ltd.',
-  'Professional Indemnity insurance is maintained at 20 times the project fee.',
-  'Liability is limited to the value of the agreement between the parties.',
-  'The liability period is 6 years from the date of the final invoice.',
-  'This fee proposal is valid for 3 months from the date of issue.',
-  'Complaints should be directed to: effiome@gmail.com. In the event of a dispute, the parties agree to attempt resolution through mediation before commencing legal proceedings.',
-  'This agreement is subject to the law and jurisdiction of England and Wales.',
-  'The client may terminate this agreement with 60 days written notice. ARX Engineers Ltd may terminate if payment is outstanding for more than 28 days.',
+  'ARX Engineers ("the Consultant") shall provide to the Client the professional services ("the Services") for the Project described in this fee proposal and as prescribed by these Terms of Agreement.',
+  'In providing the services, the Consultant shall exercise reasonable skill and care.',
+  'The Client shall provide to the Consultant briefing and all information concerning the Client\'s requirements for the commission.',
+  'The Client shall pay to the Consultant the Fee as set out in this proposal. All sums due are exclusive of Value Added Tax.',
+  'All monies payable by the Client to the Consultant shall be paid within 28 days of invoice. Monies not paid within that period shall attract interest in accordance with The Late Payment of Commercial Debts (Interest) Act 1998.',
+  'The liability of the Consultant under or in connection with this Agreement whether in contract or in tort shall not exceed the value of this Agreement.',
+  'After the expiration of six years from the date of the final invoice, the Consultant shall be discharged from all liability in respect of the Services.',
+  'Copyright in all drawings, reports, specifications, calculations and other documents provided by the Consultant shall remain the property of the Consultant.',
+  'The Client shall have a licence to use the documents for the purpose of completing the Project only.',
+  'Each party shall keep secret and confidential all information, data, specifications, drawings, reports and other documents.',
+  'Complaints should be directed in the first instance to: effiome@gmail.com.',
+  'Any dispute shall first be the subject of mediation before any legal proceedings are commenced.',
+  'The Client may terminate this agreement upon giving the Consultant 60 days written notice.',
+  'The Consultant may suspend or terminate if monies are outstanding for more than 28 days.',
+  'Neither party may assign or transfer any obligation under this Agreement without written consent.',
+  'The liability of the Consultant for any claim arising out of or in connection with asbestos is excluded.',
+  'This Appointment will be subject to UK law and jurisdiction.',
 ]
 
-// ── Main export ───────────────────────────────────────────────
-export async function generateQuoteDocx({ project, quoteData, careOf }) {
+// ── MAIN EXPORT ────────────────────────────────────────────────
+export async function generateQuoteDocx({
+  project, quoteData, careOf,
+  includeSiteVisit = false, siteVisitFee = 350, siteVisitCount = 1,
+  includeNHBC = false, nhbcFee = 350,
+  hourlyRate = 70,
+}) {
   const today = new Date()
-  const dateStr = today.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })
+  const monthYear = today.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })
   const expiryDate = new Date(today)
   expiryDate.setMonth(expiryDate.getMonth() + 3)
-  const expiryStr = expiryDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })
 
   const fee = quoteData.suggestedFee || 0
   const deposit = Math.round(fee * 0.2)
   const balance = fee - deposit
+  const siteAddress = [project.address_line1, project.town, project.postcode].filter(Boolean).join(', ')
+  const clientFirstName = (project.client_name || '').split(' ').find(w => !['Mr', 'Mrs', 'Ms', 'Miss', 'Dr', '&'].includes(w)) || project.client_name || 'Client'
 
   const addressLines = []
-  if (careOf) { addressLines.push(`For C/O ${careOf}:`); addressLines.push('') }
-  if (project.client_name) addressLines.push(project.client_name)
+  if (careOf) { addressLines.push(`For C/O ${careOf} on behalf of ${project.client_name}:`); }
+  else if (project.client_name) addressLines.push(project.client_name)
   if (project.address_line1) addressLines.push(project.address_line1)
   if (project.address_line2) addressLines.push(project.address_line2)
   if (project.town) addressLines.push(project.town)
   if (project.postcode) addressLines.push(project.postcode)
 
-  const siteAddress = [project.address_line1, project.town, project.postcode].filter(Boolean).join(', ')
-
-  // ── COVER PAGE (landscape) ────────────────────────────────
+  // ── COVER PAGE (landscape) ─────────────────────────────────
   const coverChildren = [
-    ...spacer(4),
-    new Paragraph({
-      alignment: AlignmentType.LEFT,
-      spacing: { before: 0, after: 80 },
-      children: [new TextRun({ text: 'ARX Engineers Ltd', font: FONT, size: 52, bold: true, color: PURPLE })]
-    }),
-    new Paragraph({
-      alignment: AlignmentType.LEFT,
-      spacing: { before: 0, after: 40 },
-      border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: PURPLE, space: 4 } },
-      children: [new TextRun({ text: 'Structural Engineering Fee Proposal', font: FONT, size: 32, color: '333333' })]
-    }),
-    ...spacer(2),
-    ...addressLines.map(line => new Paragraph({
-      spacing: { before: 0, after: 40 },
-      children: [new TextRun({ text: line, font: FONT, size: 24, bold: line === project.client_name })]
-    })),
-    ...spacer(1),
-    p(`Project Reference: ${project.ref}`, { size: 22, bold: true }),
-    p(`Date: ${dateStr}`, { size: 22 }),
-    p(`Valid until: ${expiryStr}`, { size: 20, color: GREY }),
-    ...spacer(4),
-    new Paragraph({
-      alignment: AlignmentType.LEFT,
-      spacing: { before: 0, after: 20 },
-      children: [new TextRun({ text: 'Effiom Esua  |  Director, BEng MSc', font: FONT, size: 18, color: GREY })]
-    }),
-    new Paragraph({
-      alignment: AlignmentType.LEFT,
-      spacing: { before: 0, after: 20 },
-      children: [new TextRun({ text: 'admin@arxengineers.co.uk  |  www.arxengineers.co.uk  |  +44 (0)772 229 8882', font: FONT, size: 18, color: GREY })]
-    }),
-    new Paragraph({
-      alignment: AlignmentType.LEFT,
-      spacing: { before: 0, after: 0 },
-      children: [new TextRun({ text: 'ARX Engineers Ltd  |  Co. No. 16198467  |  183 Marksbury Road, Bristol, BS3 5LF', font: FONT, size: 18, color: GREY })]
-    }),
+    ...sp(3),
+    // Address block top left
+    ...addressLines.map(line => para([run(line, { size: 22, bold: line === project.client_name })], { after: 40 })),
+    ...sp(1),
+    tp(`Project Reference: ${project.ref}`, { after: 40 }),
+    tp(siteAddress, { after: 40, color: GREY }),
+    ...sp(2),
+    divider(PURPLE),
+    ...sp(1),
+    tp('FEE PROPOSAL FOR STRUCTURAL ENGINEERING SERVICES', { bold: true, size: 28, color: PURPLE, before: 80, after: 80 }),
+    divider(PURPLE),
+    ...sp(1),
+    tp(monthYear, { size: 22, color: GREY }),
+    ...sp(6),
+    // Footer
+    para([run('ARX Engineers Ltd  |  Effiom Esua BEng MSc  |  Director', { size: 18, color: GREY })], { after: 20 }),
+    para([run('admin@arxengineers.co.uk  |  www.arxengineers.co.uk  |  +44 (0)772 229 8882', { size: 18, color: GREY })], { after: 20 }),
+    para([run('Company No. 16198467  |  183 Marksbury Road, Bristol, BS3 5LF', { size: 18, color: GREY })]),
   ]
 
-  // ── PAGE 2: SCOPE ─────────────────────────────────────────
+  // ── PAGE 2: PERSONAL LETTER ────────────────────────────────
+  const letterChildren = [
+    ...PERSONAL_LETTER(clientFirstName, quoteData.projectDescription || 'project'),
+    ...sp(2),
+    ...COMMITMENT_SECTION,
+  ]
+
+  // ── PAGE 3: WHAT HAPPENS NEXT + HOW WE WORK ───────────────
+  const processChildren = [
+    ...WHAT_HAPPENS_NEXT(includeSiteVisit),
+    ...sp(2),
+    ...HOW_WE_WORK,
+  ]
+
+  // ── PAGE 4: SCOPE ──────────────────────────────────────────
   const scopeChildren = [
-    sectionHeading('1.  Scope of Works'),
-    ...spacer(1),
-    p(`Project: ${siteAddress}`, { size: 20, color: GREY, after: 80 }),
-    p(quoteData.projectDescription || '', { size: 22, after: 120 }),
+    tp(`Thank you for inviting ARX to provide structural engineering services for your project. Following a review of the proposal, we have provided a fee proposal based on our understanding of the scope.`, { after: 160 }),
+    headingPara('SCOPE'),
+    tp(`According to the latest planning drawings, the following is deemed necessary for the construction of ${quoteData.projectDescription || siteAddress}:`, { after: 120 }),
     ...(quoteData.scopeItems || []).map((item, i) => new Paragraph({
       spacing: { before: 60, after: 60 },
-      indent: { left: 360, hanging: 360 },
-      children: [
-        new TextRun({ text: `${i + 1}.\t`, font: FONT, size: 22 }),
-        new TextRun({ text: item, font: FONT, size: 22 }),
-      ]
+      indent: { left: 400, hanging: 400 },
+      children: [run(`${i + 1}.\t`), run(item)],
     })),
-    ...spacer(1),
-    p(quoteData.siteVisitLine || 'No site visits considered in quotation.', { size: 20, color: GREY, before: 80 }),
+    ...sp(2),
+    headingPara('Stage 4 (DETAILED DESIGN – FOR BUILDING CONTROL & TENDER)'),
+    new Paragraph({
+      spacing: { before: 60, after: 60 },
+      indent: { left: 400, hanging: 400 },
+      children: [run('1)\t', { bold: true, color: PURPLE }), run(includeSiteVisit ? `${siteVisitCount} site visit${siteVisitCount > 1 ? 's' : ''} included in quotation` : 'No site visits considered in quotation')],
+    }),
+    new Paragraph({
+      spacing: { before: 60, after: 60 },
+      indent: { left: 400, hanging: 400 },
+      children: [run('2)\t', { bold: true, color: PURPLE }), run('Provide Building Regulations calculations.')],
+    }),
+    new Paragraph({
+      spacing: { before: 60, after: 60 },
+      indent: { left: 400, hanging: 400 },
+      children: [run('3)\t', { bold: true, color: PURPLE }), run('Produce general arrangement drawings and provide key details.')],
+    }),
+    new Paragraph({
+      spacing: { before: 60, after: 60 },
+      indent: { left: 400, hanging: 400 },
+      children: [run('4)\t', { bold: true, color: PURPLE }), run('Any changes to the architectural intent requiring structural design to be at time charge.')],
+    }),
+    ...sp(1),
+    headingPara('Stage 5 (CONSTRUCTION PHASE)'),
+    new Paragraph({
+      spacing: { before: 60, after: 60 },
+      indent: { left: 400, hanging: 400 },
+      children: [run('1)\t', { bold: true, color: PURPLE }), run('Time charge.')],
+    }),
+    ...sp(2),
+    ...BUILDING_REGS,
   ]
 
-  // ── PAGE 3: FEE ───────────────────────────────────────────
+  // ── PAGE 5: FEE ────────────────────────────────────────────
   const feeChildren = [
-    sectionHeading('2.  Fee Proposal'),
-    ...spacer(1),
+    headingPara('FEE'),
+    tp('To carry out the structural engineering scope as mentioned, our fee will be as follows:', { after: 120 }),
     new Table({
-      width: { size: 9026, type: WidthType.DXA },
-      columnWidths: [5500, 3526],
-      borders: { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder, insideH: noBorder, insideV: noBorder },
+      width: { size: CONTENT_WIDTH, type: WidthType.DXA },
+      columnWidths: [6000, 3026],
+      borders: noBorders,
       rows: [
         new TableRow({ children: [
-          new TableCell({ borders: noBorders, width: { size: 5500, type: WidthType.DXA }, margins: { top: 80, bottom: 80, left: 0, right: 120 }, shading: { fill: LIGHT_GREY, type: ShadingType.CLEAR }, children: [p('Total Fee', { bold: true, size: 22 })] }),
-          new TableCell({ borders: noBorders, width: { size: 3526, type: WidthType.DXA }, margins: { top: 80, bottom: 80, left: 120, right: 0 }, shading: { fill: LIGHT_GREY, type: ShadingType.CLEAR }, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [new TextRun({ text: `£${fee.toLocaleString()}`, font: FONT, size: 28, bold: true, color: PURPLE })] })] }),
-        ]}),
-        new TableRow({ children: [
-          new TableCell({ borders: noBorders, width: { size: 5500, type: WidthType.DXA }, margins: { top: 80, bottom: 80, left: 0, right: 120 }, children: [p('Deposit (20%) — payable on instruction', { size: 20 })] }),
-          new TableCell({ borders: noBorders, width: { size: 3526, type: WidthType.DXA }, margins: { top: 80, bottom: 80, left: 120, right: 0 }, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [new TextRun({ text: `£${deposit.toLocaleString()}`, font: FONT, size: 20 })] })] }),
-        ]}),
-        new TableRow({ children: [
-          new TableCell({ borders: noBorders, width: { size: 5500, type: WidthType.DXA }, margins: { top: 80, bottom: 80, left: 0, right: 120 }, children: [p('Balance — payable prior to issue of calculations', { size: 20 })] }),
-          new TableCell({ borders: noBorders, width: { size: 3526, type: WidthType.DXA }, margins: { top: 80, bottom: 80, left: 120, right: 0 }, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [new TextRun({ text: `£${balance.toLocaleString()}`, font: FONT, size: 20 })] })] }),
+          new TableCell({ borders: noBorders, width: { size: 6000, type: WidthType.DXA }, margins: { top: 80, bottom: 80, left: 0, right: 120 }, shading: { fill: 'EDE7F6', type: ShadingType.CLEAR }, children: [tp('Calculations and Markup Drawings', { bold: true })] }),
+          new TableCell({ borders: noBorders, width: { size: 3026, type: WidthType.DXA }, margins: { top: 80, bottom: 80, left: 120, right: 0 }, shading: { fill: 'EDE7F6', type: ShadingType.CLEAR }, children: [para([run(`£${fee.toLocaleString()}`, { bold: true, size: 26, color: PURPLE })], { align: AlignmentType.RIGHT })] }),
         ]}),
       ]
     }),
-    ...spacer(2),
-    ...(quoteData.additionalNotes?.length ? [
-      sectionHeading('Notes & Flags'),
-      ...quoteData.additionalNotes.map(n => bulletItem(n)),
-    ] : []),
-    ...spacer(2),
-    sectionHeading('Bank Details'),
-    ...spacer(1),
+    ...sp(1),
+    tp('(20% deposit on instruction, outstanding balance payable prior to issue of calculations)', { size: 18, color: GREY, after: 160 }),
+    headingPara('ADDITIONAL SCOPE (IF REQUIRED)'),
+    ...(!includeSiteVisit ? [bullet(`For site visits, we would suggest a fee of £${siteVisitFee} per site visit payable prior to visit.`)] : []),
+    ...(includeNHBC ? [bullet(`NHBC tree foundation design (NHBC 4.2): £${nhbcFee} (included in fee above)`)] : [
+      bullet(`NHBC tree foundation design (NHBC 4.2) not included. Available at £${nhbcFee} if required.`),
+    ]),
+    bullet('Construction Stage to be time charge if required.'),
+    ...sp(2),
+    ...SCOPE_ASSUMPTIONS,
+    ...sp(2),
+    headingPara('HOURLY RATE'),
     new Table({
-      width: { size: 9026, type: WidthType.DXA },
-      columnWidths: [2200, 6826],
-      borders: { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder, insideH: noBorder, insideV: noBorder },
-      rows: [
-        ['Bank', 'Monzo'],
-        ['Account name', 'ARX Engineers Ltd'],
-        ['Sort code', '04-00-03'],
-        ['Account number', '81677090'],
-        ['Reference', project.ref],
-      ].map(([label, value]) => new TableRow({ children: [
-        new TableCell({ borders: noBorders, width: { size: 2200, type: WidthType.DXA }, margins: { top: 60, bottom: 60, left: 0, right: 120 }, children: [p(label, { size: 18, color: GREY })] }),
-        new TableCell({ borders: noBorders, width: { size: 6826, type: WidthType.DXA }, margins: { top: 60, bottom: 60, left: 120, right: 0 }, children: [p(value, { size: 18 })] }),
-      ]}))
+      width: { size: CONTENT_WIDTH, type: WidthType.DXA },
+      columnWidths: [6000, 3026],
+      borders: noBorders,
+      rows: [new TableRow({ children: [
+        new TableCell({ borders: noBorders, width: { size: 6000, type: WidthType.DXA }, margins: { top: 60, bottom: 60, left: 0, right: 0 }, children: [tp('Director', { bold: true })] }),
+        new TableCell({ borders: noBorders, width: { size: 3026, type: WidthType.DXA }, margins: { top: 60, bottom: 60, left: 0, right: 0 }, children: [para([run(`£${hourlyRate}`, { bold: true })], { align: AlignmentType.RIGHT })] }),
+      ]})]
     }),
   ]
 
-  // ── PAGE 4: ASSUMPTIONS ───────────────────────────────────
-  const assumptionsChildren = [
-    sectionHeading('3.  Assumptions & Exclusions'),
-    ...spacer(1),
-    ...ASSUMPTIONS.map(a => bulletItem(a)),
+  // ── PAGE 6: ACCEPTANCE ─────────────────────────────────────
+  const acceptanceChildren = [
+    headingPara('ACCEPTANCE'),
+    tp('I accept the fee proposal and terms and conditions.', { after: 160 }),
+    tp('Name(s):      _____________________________________', { after: 120 }),
+    tp('Address:      _____________________________________', { after: 80 }),
+    tp('               ________________________________________', { after: 80 }),
+    tp('               ________________________________________', { after: 160 }),
+    tp('Signature: ________________________', { after: 120 }),
+    tp('Date: ________________', { after: 200 }),
+    tp('(*) In the case of acceptance, please return a signed copy of this fee proposal via post or email. This is a condition required for us to begin our involvement on the project. This offer will act as a private contract between both parties, without affecting to the formal contract signature.', { size: 18, color: GREY, after: 200 }),
+    divider(PURPLE),
+    ...sp(1),
+    tp('We look forward to working with you and delivering a result you are truly proud of.', { italic: true, color: PURPLE, align: AlignmentType.CENTER, after: 40 }),
+    ...sp(2),
+    headingPara('STANDARD TERMS OF AGREEMENT FOR PROFESSIONAL SERVICES'),
+    ...TC_CLAUSES.map((tc, i) => tcClause(i + 1, tc)),
   ]
-
-  // ── PAGE 5: T&Cs ──────────────────────────────────────────
-  const tcChildren = [
-    sectionHeading('4.  Terms & Conditions'),
-    ...spacer(1),
-    ...TC_CLAUSES.map((tc, i) => tcItem(i + 1, tc)),
-  ]
-
-  // ── PAGE 6: CLOSING ───────────────────────────────────────
-  const closingChildren = [
-    sectionHeading('5.  Acceptance'),
-    ...spacer(2),
-    new Paragraph({
-      alignment: AlignmentType.CENTER,
-      spacing: { before: 0, after: 80 },
-      children: [new TextRun({ text: 'We trust this proposal meets with your approval.', font: FONT, size: 22, italics: true, color: PURPLE })]
-    }),
-    new Paragraph({
-      alignment: AlignmentType.CENTER,
-      spacing: { before: 0, after: 80 },
-      children: [new TextRun({ text: 'Please confirm your instruction by return email and we will issue our deposit invoice.', font: FONT, size: 22, italics: true, color: PURPLE })]
-    }),
-    ...spacer(3),
-    p('Best regards,', { size: 22, after: 40 }),
-    ...spacer(1),
-    p('Effiom Esua', { size: 22, bold: true }),
-    p('Director | BEng MSc', { size: 20 }),
-    p('ARX Engineers Ltd', { size: 20, color: PURPLE }),
-    p('admin@arxengineers.co.uk  |  www.arxengineers.co.uk', { size: 18, color: GREY }),
-    p('+44 (0)772 229 8882', { size: 18, color: GREY }),
-    ...spacer(1),
-    new Paragraph({
-      spacing: { before: 60, after: 0 },
-      border: { top: { style: BorderStyle.SINGLE, size: 2, color: 'DDDDDD', space: 4 } },
-      children: [new TextRun({ text: 'Aim For Excellence', font: FONT, size: 18, bold: true, color: PURPLE })]
-    }),
-    new Paragraph({
-      spacing: { before: 0, after: 0 },
-      children: [new TextRun({ text: 'ARX Engineers Ltd  |  Registered in England & Wales  |  Company No. 16198467', font: FONT, size: 16, color: GREY })]
-    }),
-    new Paragraph({
-      spacing: { before: 0, after: 0 },
-      children: [new TextRun({ text: 'Registered Office: 183 Marksbury Road, Bristol, BS3 5LF', font: FONT, size: 16, color: GREY })]
-    }),
-  ]
-
-  const A4_PORTRAIT = { width: 11906, height: 16838 }
-  const margin = { top: 1440, right: 1440, bottom: 1440, left: 1440 }
 
   const doc = new Document({
-    numbering: { config: [] },
-    styles: {
-      default: { document: { run: { font: FONT, size: 22 } } }
-    },
+    styles: { default: { document: { run: { font: FONT, size: 22 } } } },
     sections: [
       // Cover - landscape
       {
         properties: {
           page: {
-            size: { width: A4_PORTRAIT.height, height: A4_PORTRAIT.width, orientation: PageOrientation.LANDSCAPE },
+            size: { width: A4P.height, height: A4P.width, orientation: PageOrientation.LANDSCAPE },
             margin: { top: 1800, right: 1800, bottom: 1800, left: 1800 }
           }
         },
         children: coverChildren,
       },
-      // Pages 2-6 - portrait
+      // All other pages - portrait
       {
-        properties: { page: { size: A4_PORTRAIT, margin } },
+        properties: { page: { size: A4P, margin: MARGIN } },
         children: [
+          ...letterChildren,
+          new Paragraph({ pageBreakBefore: true, children: [run('')] }),
+          ...processChildren,
+          new Paragraph({ pageBreakBefore: true, children: [run('')] }),
           ...scopeChildren,
-          pageBreak(),
+          new Paragraph({ pageBreakBefore: true, children: [run('')] }),
           ...feeChildren,
-          pageBreak(),
-          ...assumptionsChildren,
-          pageBreak(),
-          ...tcChildren,
-          pageBreak(),
-          ...closingChildren,
+          new Paragraph({ pageBreakBefore: true, children: [run('')] }),
+          ...acceptanceChildren,
         ]
       }
     ]
@@ -309,13 +357,4 @@ export async function generateQuoteDocx({ project, quoteData, careOf }) {
   return await Packer.toBlob(doc)
 }
 
-export function downloadDocx(blob, filename) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-}
+export { downloadDocx } from './invoiceDocx.js'
