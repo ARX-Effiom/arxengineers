@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { generateInvoiceDocx, downloadDocx } from '../lib/invoiceDocx'
 
 export default function Invoices() {
   const [invoices, setInvoices] = useState([])
@@ -9,6 +10,7 @@ export default function Invoices() {
   const [form, setForm] = useState({ project_id: '', type: 'deposit', amount: '', due_at: '' })
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState(null)
+  const [generatingDocx, setGeneratingDocx] = useState(null)
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type })
@@ -57,6 +59,26 @@ export default function Invoices() {
       if (type === 'variation') amount = ''
     }
     setForm(prev => ({ ...prev, type, amount }))
+  }
+
+  const handleDownload = async (inv) => {
+    setGeneratingDocx(inv.id)
+    try {
+      const { data: proj } = await supabase.from('projects').select('*').eq('ref', inv.ref).single()
+      const buffer = await generateInvoiceDocx({
+        project: proj || { ref: inv.ref, client_name: inv.projects?.client_name, address_line1: inv.projects?.address_line1 },
+        invoiceType: inv.type,
+        amount: inv.amount,
+        invoiceRef: null,
+        dueDate: inv.due_at,
+        careOf: null,
+      })
+      const prefix = inv.type === 'deposit' ? 'INV-DEP' : inv.type === 'balance' ? 'INV-BAL' : 'VO'
+      downloadDocx(buffer, `${prefix}-${inv.ref}.docx`)
+    } catch (e) {
+      showToast('Failed to generate document: ' + e.message, 'error')
+    }
+    setGeneratingDocx(null)
   }
 
   const handleSave = async () => {
@@ -177,12 +199,22 @@ export default function Invoices() {
                       </span>
                     </td>
                     <td style={{ padding: '12px 14px' }}>
-                      <button
-                        className={`btn-sm ${inv.paid ? 'btn-ghost' : 'btn-primary'}`}
-                        onClick={() => togglePaid(inv)}
-                      >
-                        {inv.paid ? 'Mark unpaid' : 'Mark paid'}
-                      </button>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <button
+                          className="btn-secondary btn-sm"
+                          onClick={() => handleDownload(inv)}
+                          disabled={generatingDocx === inv.id}
+                          title="Download invoice"
+                        >
+                          {generatingDocx === inv.id ? '...' : '⬇ .docx'}
+                        </button>
+                        <button
+                          className={`btn-sm ${inv.paid ? 'btn-ghost' : 'btn-primary'}`}
+                          onClick={() => togglePaid(inv)}
+                        >
+                          {inv.paid ? 'Mark unpaid' : 'Mark paid'}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )
