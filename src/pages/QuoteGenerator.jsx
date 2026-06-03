@@ -33,6 +33,12 @@ export default function QuoteGenerator() {
   const [error, setError] = useState(null)
   const [saved, setSaved] = useState(false)
   const [generatingDocx, setGeneratingDocx] = useState(false)
+  const [includeSiteVisit, setIncludeSiteVisit] = useState(false)
+  const [siteVisitFee, setSiteVisitFee] = useState(350)
+  const [siteVisitCount, setSiteVisitCount] = useState(1)
+  const [includeNHBC, setIncludeNHBC] = useState(false)
+  const [hourlyRate, setHourlyRate] = useState(70)
+  const [careOf, setCareOf] = useState('')
 
 
   useEffect(() => {
@@ -110,7 +116,12 @@ export default function QuoteGenerator() {
       const proj = selectedProject
         ? projects.find(p => p.id === selectedProject) || {}
         : { ref: 'ARX', client_name: '', address_line1: '', town: '', postcode: '' }
-      const blob = await generateQuoteDocx({ project: proj, quoteData, careOf: null })
+      const blob = await generateQuoteDocx({
+        project: proj, quoteData,
+        careOf: careOf || null,
+        includeSiteVisit, siteVisitFee: Number(siteVisitFee), siteVisitCount: Number(siteVisitCount),
+        includeNHBC, hourlyRate: Number(hourlyRate),
+      })
       const addr = [proj.address_line1, proj.postcode].filter(Boolean).join(' ')
       downloadDocx(blob, `${proj.ref} - ${addr} - ARX Structural Fee Quote.docx`)
     } catch (e) {
@@ -245,13 +256,58 @@ Loft conversion with hip-to-gable and rear dormer, plus a single storey rear ext
                   Link to a project above to save this quote
                 </div>
               )}
+              {/* Quote options */}
+              <div className="card" style={{ padding: 16, marginTop: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 12 }}>Quote Options</div>
+
+                {/* C/O */}
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ textTransform: 'none', fontSize: 13, fontWeight: 500 }}>C/O (care of)</label>
+                  <input value={careOf} onChange={e => setCareOf(e.target.value)} placeholder="Architect / agent name (optional)" style={{ marginTop: 4 }} />
+                </div>
+
+                {/* Site visit */}
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, textTransform: 'none', fontSize: 13, fontWeight: 500, marginBottom: 6 }}>
+                    <input type="checkbox" style={{ width: 'auto' }} checked={includeSiteVisit} onChange={e => setIncludeSiteVisit(e.target.checked)} />
+                    Include site visit(s)
+                  </label>
+                  {includeSiteVisit && (
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ fontSize: 11 }}>No. of visits</label>
+                        <input type="number" value={siteVisitCount} onChange={e => setSiteVisitCount(e.target.value)} min="1" max="5" />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ fontSize: 11 }}>Fee per visit (£)</label>
+                        <input type="number" value={siteVisitFee} onChange={e => setSiteVisitFee(e.target.value)} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* NHBC */}
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, textTransform: 'none', fontSize: 13, fontWeight: 500 }}>
+                    <input type="checkbox" style={{ width: 'auto' }} checked={includeNHBC} onChange={e => setIncludeNHBC(e.target.checked)} />
+                    NHBC tree foundation design (4.2)
+                  </label>
+                </div>
+
+                {/* Hourly rate */}
+                <div>
+                  <label style={{ fontSize: 11 }}>Hourly rate (£/hr)</label>
+                  <input type="number" value={hourlyRate} onChange={e => setHourlyRate(e.target.value)} style={{ maxWidth: 120 }} />
+                </div>
+              </div>
+
               <button
                 className="btn-secondary"
                 style={{ width: '100%', padding: 12, marginTop: 8 }}
                 onClick={handleDownloadQuote}
                 disabled={generatingDocx}
               >
-                {generatingDocx ? '...' : '⬇ Download Quote (.docx)'}
+                {generatingDocx ? '⏳ Generating...' : '⬇ Download Quote (.docx)'}
               </button>
             </div>
           )}
