@@ -215,16 +215,17 @@ export async function generateInvoiceDocx({ project, invoiceType, amount, invoic
     }]
   })
 
-  const buffer = await Packer.toBuffer(doc)
-  return buffer
+  const blob = await Packer.toBlob(doc)
+  return blob
 }
 
-export function downloadDocx(buffer, filename) {
-  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
+export function downloadDocx(blob, filename) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
   a.download = filename
+  document.body.appendChild(a)
   a.click()
+  document.body.removeChild(a)
   URL.revokeObjectURL(url)
 }
