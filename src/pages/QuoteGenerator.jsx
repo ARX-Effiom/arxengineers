@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { generateQuoteDocx, downloadDocx } from '../lib/quoteDocx'
 
 const SYSTEM_PROMPT = `You are the AI assistant for ARX Engineers Ltd, a structural engineering consultancy in Bristol. 
 
@@ -31,6 +32,7 @@ export default function QuoteGenerator() {
   const [quoteData, setQuoteData] = useState(null)
   const [error, setError] = useState(null)
   const [saved, setSaved] = useState(false)
+  const [generatingDocx, setGeneratingDocx] = useState(false)
 
 
   useEffect(() => {
@@ -99,6 +101,22 @@ export default function QuoteGenerator() {
       }).eq('id', selectedProject)
       setSaved(true)
     }
+  }
+
+  const handleDownloadQuote = async () => {
+    if (!quoteData) return
+    setGeneratingDocx(true)
+    try {
+      const proj = selectedProject
+        ? projects.find(p => p.id === selectedProject) || {}
+        : { ref: 'ARX', client_name: '', address_line1: '', town: '', postcode: '' }
+      const blob = await generateQuoteDocx({ project: proj, quoteData, careOf: null })
+      const addr = [proj.address_line1, proj.postcode].filter(Boolean).join(' ')
+      downloadDocx(blob, `${proj.ref} - ${addr} - ARX Structural Fee Quote.docx`)
+    } catch (e) {
+      setError('Failed to generate document: ' + e.message)
+    }
+    setGeneratingDocx(false)
   }
 
   return (
@@ -227,6 +245,14 @@ Loft conversion with hip-to-gable and rear dormer, plus a single storey rear ext
                   Link to a project above to save this quote
                 </div>
               )}
+              <button
+                className="btn-secondary"
+                style={{ width: '100%', padding: 12, marginTop: 8 }}
+                onClick={handleDownloadQuote}
+                disabled={generatingDocx}
+              >
+                {generatingDocx ? '...' : '⬇ Download Quote (.docx)'}
+              </button>
             </div>
           )}
         </div>
