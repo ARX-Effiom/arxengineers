@@ -8,10 +8,12 @@ import Invoices from './pages/Invoices'
 import Comms from './pages/Comms'
 import Contacts from './pages/Contacts'
 import Referrals from './pages/Referrals'
+import Tasks from './pages/Tasks'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: '⬡' },
   { id: 'projects', label: 'Projects', icon: '📁' },
+  { id: 'tasks', label: 'Tasks', icon: '✅' },
   { id: 'quotes', label: 'Quote Generator', icon: '📝' },
   { id: 'invoices', label: 'Invoices', icon: '💷' },
   { id: 'comms', label: 'Comms', icon: '✉️' },
@@ -25,6 +27,7 @@ export default function App() {
   const pages = {
     dashboard: <Dashboard onNavigate={setPage} />,
     projects: <Projects />,
+    tasks: <Tasks />,
     quotes: <QuoteGenerator />,
     invoices: <Invoices />,
     comms: <Comms />,
