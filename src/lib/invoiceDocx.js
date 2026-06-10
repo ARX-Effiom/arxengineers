@@ -40,7 +40,7 @@ const dividerLine = (color = PURPLE) => new Paragraph({
   children: [new TextRun({ text: '', font: 'Arial', size: 2 })]
 })
 
-export async function generateInvoiceDocx({ project, invoiceType, amount, invoiceRef, dueDate, careOf }) {
+export async function generateInvoiceDocx({ project, invoiceType, amount, invoiceRef, dueDate, careOf, billing }) {
   const today = new Date()
   const dateStr = today.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })
   const dueDateStr = dueDate
@@ -50,14 +50,24 @@ export async function generateInvoiceDocx({ project, invoiceType, amount, invoic
   const typeLabel = invoiceType === 'deposit' ? 'DEPOSIT' : invoiceType === 'balance' ? 'BALANCE' : 'VARIATION ORDER'
   const amountFormatted = `£${Number(amount).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 
-  // Build address lines
+  // Build address lines — use billing address if provided, else fall back to project address
+  const hasBilling = billing && (billing.name || billing.line1)
   const addressLines = []
   if (careOf) addressLines.push(`For C/O ${careOf}:`)
-  if (project.client_name) addressLines.push(project.client_name)
-  if (project.address_line1) addressLines.push(project.address_line1)
-  if (project.address_line2) addressLines.push(project.address_line2)
-  if (project.town) addressLines.push(project.town)
-  if (project.postcode) addressLines.push(project.postcode)
+  if (hasBilling) {
+    if (billing.name)     addressLines.push(billing.name)
+    if (billing.line1)    addressLines.push(billing.line1)
+    if (billing.line2)    addressLines.push(billing.line2)
+    if (billing.town)     addressLines.push(billing.town)
+    if (billing.postcode) addressLines.push(billing.postcode)
+  } else {
+    if (project.client_name)  addressLines.push(project.client_name)
+    if (project.address_line1) addressLines.push(project.address_line1)
+    if (project.address_line2) addressLines.push(project.address_line2)
+    if (project.town)          addressLines.push(project.town)
+    if (project.postcode)      addressLines.push(project.postcode)
+  }
+  const billingDisplayName = hasBilling ? billing.name : project.client_name
 
   const description = invoiceType === 'deposit'
     ? `Deposit invoice for structural engineering services in connection with proposed works at ${[project.address_line1, project.town, project.postcode].filter(Boolean).join(', ')}.`
@@ -140,7 +150,7 @@ export async function generateInvoiceDocx({ project, invoiceType, amount, invoic
             children: [
               cell([
                 para('To', { size: 16, color: '888888' }),
-                ...addressLines.map(l => para(l, { size: 20, bold: l === project.client_name })),
+                ...addressLines.map(l => para(l, { size: 20, bold: l === billingDisplayName })),
               ], { width: 4513 }),
               cell([
                 para('Project reference', { size: 16, color: '888888' }),
