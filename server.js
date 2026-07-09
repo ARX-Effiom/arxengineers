@@ -95,7 +95,10 @@ Respond ONLY with valid JSON — no preamble, no markdown fences:
     const rawText = data.content?.[0]?.text || ''
     let parsed
     try {
-      parsed = JSON.parse(rawText.replace(/```json|```/g, '').trim())
+      const clean = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+      const jsonStart = clean.indexOf('{')
+      const jsonEnd = clean.lastIndexOf('}')
+      parsed = JSON.parse(clean.slice(jsonStart, jsonEnd + 1))
     } catch {
       parsed = { existing: [], proposed: [], remove: [], retain: [], notes: [`Parse error — raw: ${rawText.slice(0, 200)}`] }
     }
