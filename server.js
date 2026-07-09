@@ -110,7 +110,7 @@ Respond ONLY with valid JSON — no preamble, no markdown fences:
 // ─── /api/check-package ──────────────────────────────────────────────────────
 // Add these endpoints to server.js alongside existing /api/claude and /api/analyse-drawings
 
-// ── Calc & drawing review agent ───────────────────────────────────────────────
+// ── Calc & drawing review agent (multi-pass) ──────────────────────────────────
 app.post('/api/check-package', async (req, res) => {
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) return res.status(500).json({ error: 'API key not configured' })
@@ -118,123 +118,93 @@ app.post('/api/check-package', async (req, res) => {
   const { calc, drawing } = req.body
   if (!calc && !drawing) return res.status(400).json({ error: 'No files provided' })
 
-  const SYSTEM = `You are a senior structural engineer conducting a technical review for ARX Engineers Ltd, a Bristol-based structural engineering consultancy. Director: Effiom Esua BEng MSc.
+  // ── ARX standard values baked in for calibration ──────────────────────────
+  const ARX_STANDARDS = `
+ARX ENGINEERS — STANDARD DESIGN VALUES (use these to calibrate your review):
 
-Your role is equivalent to a second engineer peer review. You are reviewing Tedds for Word calculation packages and/or structural drawing packages produced by ARX Engineers.
+DEFLECTION LIMITS (from ARX cover page template):
+- Timber final deflection (1.6Gk + Qk): Span/250, max 14mm
+- Timber instantaneous deflection (Gk + Qk): Span/360, max 14mm
+- Steel imposed load over brittle finishes: Span/500, max 10mm
+- Steel imposed load non-brittle: Span/360, max 15mm
+- Steel total (DL + IL): Span/360, max 25mm
+- Wind horizontal (brittle): Height/500
+- Wind horizontal (non-brittle): Height/300
+- Steel vertical fundamental frequency: minimum 4.5 Hz
 
-ARX works to Eurocodes (EN 1990, EN 1991, EN 1993, EN 1995, EN 1996) and British Standards, primarily on residential projects: extensions, loft conversions, internal alterations, new builds.
+STANDARD LOAD VALUES:
+- Timber floor (with partitions): DL = 0.50 kN/m², IL = 1.50 kN/m², partition = 0.50 kN/m²
+- Flat roof (timber, non-accessible): DL = 0.60 kN/m², IL = 0.60 kN/m²
+- Cold pitched roof (concrete tiles, storage): DL = 1.45 kN/m², IL = 0.75 kN/m²
+- Cavity wall (existing): DL = 4.50 kN/m²
+- Cavity wall (new): DL = 4.70 kN/m²
 
-CALCULATION REVIEW — check for:
-1. Load take-downs: Are tributary widths and areas reasonable? Do loads trace logically from roof → floors → beams → columns → foundations?
-2. Load values: Are dead loads reasonable for the construction type? (Timber floor ~0.5 kN/m², cavity wall ~4.5 kN/m², concrete tiles pitched roof ~1.4 kN/m²). Flag anything outside normal residential ranges.
-3. Load combinations: Are EN 1990 combination factors correct? (1.35Gk + 1.5Qk for strength, with appropriate ψ factors for wind)
-4. Code references: Is the correct code being applied for each element type? (EC3 for steel, EC5 for timber, EC6 for masonry)
-5. Missing checks: Has bending AND shear AND deflection AND bearing been checked for every member? For steel: classification, LTB if applicable. For timber: service class, load duration, load sharing where claimed.
-6. Deflection limits: Do the limits used in individual member checks match those stated on the cover page?
-7. Member IDs: Do section sizes in conclusion lines match those in the drawing member schedule?
-8. Bearing lengths: Are bearing lengths in calculations consistent with padstone sizes specified?
-9. Units: Flag any apparent unit inconsistencies (kN vs kN/m, mm vs m)
-10. Inspection items: Flag any members designed "by inspection" without calculation — are these reasonable given the spans and loads involved?
-11. Service class: Is the correct service class used? (Exposed external = class 3, internal = class 1 or 2)
-12. Material grades: Are the grades consistent throughout (S355 for steel, C24 for structural timber, grade stated for concrete)?
+MATERIAL GRADES:
+- Steel: S355
+- Structural timber joists/beams: C24
+- Structural timber studs: C16
+- Reinforced concrete: C28/35 (cover page) or C32/35 (rebar spec)
+- Mass concrete foundations: Gen 3
+- RC ground bearing slab: Gen 3
 
-DRAWING REVIEW — check for:
-1. Member schedule completeness: Is every member referenced on the plan (B-1, L-5, C-3 etc.) present in the member schedule with a full size specification?
-2. Connection schedule completeness: Is every connection reference (CD-x) on the plan covered by either a schedule entry or a detail drawing?
-3. Detail coverage: Are there any connection references that say "REFER TO CONSTRUCTION DETAIL SHEET x" where that detail is missing?
-4. Padstone positions: Is a padstone specified at every point load bearing? Do padstone sizes (PS-1 through PS-4) seem appropriate for the beam sizes they support?
-5. Bearing dimensions: Are steel beam bearings noted on the plan consistent with what the member schedule implies?
-6. Timber members: Are floor joist directions clear? Are all trimmer and doubled joist positions shown?
-7. Reinforcement: Do cover dimensions shown match the rebar spec table? Are lap lengths noted?
-8. General notes consistency: Do material grades in the general notes match the material spec in the calculations?
-9. Wall types: Are assumed wall widths (cavity wall widths etc.) consistent between foundation GA and floor GA?
-10. Title block: Is the revision number, scale, and drawing reference complete on every sheet?
+LOAD COMBINATIONS (EN 1990):
+- ULS strength: 1.35Gk + 1.5Qk (+ 0.75×1.5Wk when wind included)
+- SLS service: 1.0Gk + 1.0Qk (+ 0.5Wk when wind included)
+- ULS wind dominant: 1.35Gk + 1.05Qk + 1.5Wk
 
-CROSS-REFERENCE (when both calc and drawing provided):
-- Do section sizes in calc conclusion lines match the drawing member schedule?
-- Do design spans in calculations match scaled/dimensioned spans on drawings?
-- Do bearing lengths assumed in calcs match padstone specifications on drawings?
-- Are all calculated members shown on the drawings? Are there members on drawings that appear undesigned?
+MINIMUM BEARINGS:
+- Steel beam on masonry: 150mm minimum (full leaf width if no bearing detail shown)
+- Timber joist on masonry: 100mm minimum
+- Timber joist on steel: 75mm minimum`
 
-SEVERITY CLASSIFICATION:
-- critical: Would likely cause structural failure or non-compliance with Building Regulations if unresolved
-- major: Significant error or omission requiring correction before issue
-- minor: Small inconsistency or sub-optimal approach — should be corrected but not critical
-- query: Clarification needed — could be intentional but requires confirmation
-- pass: Explicit confirmation that a check has been performed and passed correctly
+  const MEMBER_REVIEW_SYSTEM = `You are a senior structural engineer conducting a peer review for ARX Engineers Ltd. Director: Effiom Esua BEng MSc. You are reviewing individual member calculations from a Tedds for Word calculation package.
 
-Respond ONLY with valid JSON — no preamble, no markdown:
-{
-  "projectRef": "string or null",
-  "projectTitle": "string or null", 
-  "calcBy": "string or null",
-  "summary": "2-3 sentence overall assessment of the package quality and main issues",
-  "comments": [
-    {
-      "severity": "critical|major|minor|query|pass",
-      "member": "member ID or null e.g. FJ-1, B-3, L-5",
-      "clause": "code clause or null e.g. EN1995-1-1 cl.6.1.6",
-      "title": "concise issue title under 15 words",
-      "detail": "full explanation of the issue with specific values where possible",
-      "recommendation": "what action to take, or null if pass"
-    }
-  ]
-}`
+${ARX_STANDARDS}
 
-  try {
-    // ── Build message content ─────────────────────────────────────────────────
-    const content = []
+For each member calculation provided, check:
+1. LOADS: Are load inputs consistent with the ARX standard values above? Flag any that differ significantly without explanation.
+2. LOAD COMBINATIONS: Are EN 1990 combination factors correct?
+3. CHECKS COMPLETENESS: Has bending AND shear AND deflection AND bearing all been checked? Flag any missing.
+4. DEFLECTION LIMITS: Do the limits used match ARX standards above exactly?
+5. PASS/FAIL: Are all checks passing? If a check is close to the limit (utilisation > 0.85) flag as a query.
+6. SERVICE CLASS: Is the correct timber service class used?
+7. INSPECTION ITEMS: If a member is "designed by inspection", is this reasonable for the span and load?
+8. MATERIAL GRADE: Is the correct grade used (S355 steel, C24 timber)?
+9. BEARING LENGTHS: Are bearing lengths stated and do they meet minimums?
+10. UNITS: Are there any apparent unit errors?
 
-    // Calc file
-    if (calc) {
-      if (calc.type === 'docx') {
-        // Extract text from docx via mammoth
-        const buffer = Buffer.from(calc.data, 'base64')
-        const extracted = await mammoth.extractRawText({ buffer })
-        content.push({
-          type: 'text',
-          text: `CALCULATION PACKAGE — ${calc.filename}\n\n${extracted.value.slice(0, 80000)}` // ~60k tokens limit
-        })
-      } else if (calc.type === 'images') {
-        content.push({ type: 'text', text: `CALCULATION PACKAGE — ${calc.filename} (${calc.pages.length} pages):` })
-        // Send up to 15 calc pages to avoid token limits
-        const pagesToSend = calc.pages.slice(0, 15)
-        for (const page of pagesToSend) {
-          content.push({
-            type: 'image',
-            source: { type: 'base64', media_type: 'image/jpeg', data: page.data }
-          })
-        }
-        if (calc.pages.length > 15) {
-          content.push({ type: 'text', text: `[Note: ${calc.pages.length - 15} additional calculation pages not shown due to size limits]` })
-        }
-      }
-    }
+Return ONLY valid JSON, no markdown fences:
+{"comments": [{"severity": "critical|major|minor|query|pass", "member": "member ID", "clause": "code clause or null", "title": "concise title", "detail": "specific detail with values", "recommendation": "action or null"}]}`
 
-    // Drawing file
-    if (drawing) {
-      content.push({ type: 'text', text: `\nSTRUCTURAL DRAWINGS — ${drawing.filename} (${drawing.pages.length} pages):` })
-      const pagesToSend = drawing.pages.slice(0, 12)
-      for (const page of pagesToSend) {
-        content.push({
-          type: 'image',
-          source: { type: 'base64', media_type: 'image/jpeg', data: page.data }
-        })
-      }
-      if (drawing.pages.length > 12) {
-        content.push({ type: 'text', text: `[Note: ${drawing.pages.length - 12} additional drawing pages not shown due to size limits]` })
-      }
-    }
+  const DRAWING_REVIEW_SYSTEM = `You are a senior structural engineer reviewing structural drawings for ARX Engineers Ltd.
 
-    content.push({
-      type: 'text',
-      text: calc && drawing
-        ? 'Please review the calculation package and drawings together. Cross-reference member IDs, section sizes, spans, and bearing lengths between the two. Return the JSON review.'
-        : calc
-        ? 'Please review this calculation package. Return the JSON review.'
-        : 'Please review these structural drawings. Return the JSON review.'
-    })
+${ARX_STANDARDS}
 
+Review the drawings for:
+1. MEMBER SCHEDULE: Is every member shown on the plan (B-1, L-5, C-3 etc.) in the member schedule with a full specification?
+2. CONNECTIONS: Is every connection reference (CD-x) on the plan covered by a schedule entry or detail?
+3. PADSTONES: Is a padstone specified at every point load bearing? Are sizes appropriate?
+4. BEARING DIMENSIONS: Are steel beam bearings shown and do they meet 150mm minimum?
+5. TIMBER: Are joist directions clear? Are trimmers and doubled joists shown at all openings?
+6. NOTES CONSISTENCY: Do material grades in general notes match ARX standards?
+7. TITLE BLOCK: Is revision, scale, drawing reference complete on every sheet?
+8. WALL DIMENSIONS: Are assumed cavity wall widths consistent throughout?
+
+Return ONLY valid JSON, no markdown fences:
+{"comments": [{"severity": "critical|major|minor|query|pass", "member": "member ID or null", "clause": "code clause or null", "title": "concise title", "detail": "specific detail", "recommendation": "action or null"}]}`
+
+  const SYNTHESIS_SYSTEM = `You are a senior structural engineer writing a final review summary for ARX Engineers Ltd.
+
+You have been given the results of a multi-pass review of a structural calculation package and drawings. Synthesise these findings into:
+1. A 3-4 sentence overall summary of package quality
+2. Any cross-reference issues between calcs and drawings (member IDs, section sizes, spans, bearings)
+3. Identify the project ref, title, and calc author from the cover page text provided
+
+Return ONLY valid JSON, no markdown fences:
+{"projectRef": "string or null", "projectTitle": "string or null", "calcBy": "string or null", "summary": "3-4 sentence summary"}`
+
+  // ── Helper: single Claude call ─────────────────────────────────────────────
+  async function claudeCall(system, content, maxTokens = 4000) {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -244,36 +214,179 @@ Respond ONLY with valid JSON — no preamble, no markdown:
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 8000,
-        system: SYSTEM,
+        max_tokens: maxTokens,
+        system,
         messages: [{ role: 'user', content }],
       }),
     })
-
     const data = await response.json()
-    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || 'Claude API error' })
+    if (!response.ok) throw new Error(data.error?.message || 'Claude API error')
+    return data.content?.[0]?.text || ''
+  }
 
-    const rawText = data.content?.[0]?.text || ''
-    let parsed
+  // ── Helper: parse JSON safely ──────────────────────────────────────────────
+  function safeParseJSON(text, fallback) {
     try {
-    const clean = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-    const jsonStart = clean.indexOf('{')
-    const jsonEnd = clean.lastIndexOf('}')
-    parsed = JSON.parse(clean.slice(jsonStart, jsonEnd + 1))
+      const clean = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+      const start = clean.indexOf('{')
+      const end = clean.lastIndexOf('}')
+      if (start === -1 || end === -1) return fallback
+      return JSON.parse(clean.slice(start, end + 1))
     } catch {
-      parsed = {
-        projectRef: null, projectTitle: null, calcBy: null,
-        summary: 'Review completed but response could not be parsed. Raw output may contain useful information.',
-        comments: [{ severity: 'query', member: null, clause: null, title: 'Parse error — see server logs', detail: rawText.slice(0, 500), recommendation: 'Contact support' }]
+      return fallback
+    }
+  }
+
+  // ── Helper: split calc text by member ─────────────────────────────────────
+  function splitByMember(text) {
+    // Split on lines that look like member headings (all caps, short, followed by content)
+    // Patterns: "BEAM B-1", "LINTEL L-5", "FLOOR JOIST FJ-1", "COLUMN C-3", etc.
+    const memberPattern = /\n(?=(BEAM|LINTEL|FLOOR JOIST|ROOF JOIST|CEILING JOIST|COLUMN|POST|TRUSS|RAFTER|FOUNDATION|RAFT|SLAB|WALL|MASONRY|PADSTONE|STAIRCASE|TRIMMER|RIDGE|PURLIN|WINDPOST)[^\n]{0,30}\n)/gi
+    
+    const parts = text.split(memberPattern)
+    
+    // Group into chunks of reasonable size (~15000 chars each)
+    const chunks = []
+    let current = ''
+    
+    for (const part of parts) {
+      if (!part) continue
+      if (current.length + part.length > 15000 && current.length > 0) {
+        chunks.push(current.trim())
+        current = part
+      } else {
+        current += '\n' + part
+      }
+    }
+    if (current.trim()) chunks.push(current.trim())
+    
+    // Always include first chunk (cover page + loading) regardless
+    return chunks.length > 0 ? chunks : [text.slice(0, 15000)]
+  }
+
+  try {
+    const allComments = []
+    let coverText = ''
+
+    // ── PASS 1: Calculation review (chunked by member) ──────────────────────
+    if (calc) {
+      let calcText = ''
+
+      if (calc.type === 'docx') {
+        const buffer = Buffer.from(calc.data, 'base64')
+        const extracted = await mammoth.extractRawText({ buffer })
+        calcText = extracted.value
+        console.log(`Calc text extracted: ${calcText.length} chars, ~${Math.round(calcText.length/500)} pages`)
+      } else if (calc.type === 'images') {
+        // For PDF calcs, still use image approach but process all pages in groups
+        const pageGroups = []
+        for (let i = 0; i < calc.pages.length; i += 8) {
+          pageGroups.push(calc.pages.slice(i, i + 8))
+        }
+        for (let g = 0; g < pageGroups.length; g++) {
+          const group = pageGroups[g]
+          const content = [
+            { type: 'text', text: `Calculation pages ${g*8+1}–${g*8+group.length} of ${calc.pages.length} from ${calc.filename}:` },
+            ...group.map(p => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: p.data } })),
+            { type: 'text', text: 'Review these calculation pages. Return JSON with comments array.' }
+          ]
+          const raw = await claudeCall(MEMBER_REVIEW_SYSTEM, content, 3000)
+          const result = safeParseJSON(raw, { comments: [] })
+          allComments.push(...(result.comments || []))
+        }
+      }
+
+      // For docx: split and review each chunk
+      if (calcText) {
+        coverText = calcText.slice(0, 3000) // save cover for synthesis
+        const chunks = splitByMember(calcText)
+        console.log(`Split into ${chunks.length} chunks for review`)
+
+        // Review chunks in parallel (max 5 at a time to avoid rate limits)
+        const batchSize = 5
+        for (let i = 0; i < chunks.length; i += batchSize) {
+          const batch = chunks.slice(i, i + batchSize)
+          const batchResults = await Promise.all(batch.map(async (chunk, idx) => {
+            const content = `CALCULATION CHUNK ${i + idx + 1} of ${chunks.length} from ${calc.filename}:\n\n${chunk}\n\nReview this section. Return JSON with comments array.`
+            const raw = await claudeCall(MEMBER_REVIEW_SYSTEM, content, 3000)
+            return safeParseJSON(raw, { comments: [] })
+          }))
+          for (const result of batchResults) {
+            allComments.push(...(result.comments || []))
+          }
+        }
       }
     }
 
-    res.json(parsed)
+    // ── PASS 2: Drawing review ───────────────────────────────────────────────
+    if (drawing) {
+      // Process all drawing pages in groups of 6
+      const pageGroups = []
+      for (let i = 0; i < drawing.pages.length; i += 6) {
+        pageGroups.push(drawing.pages.slice(i, i + 6))
+      }
+
+      const drawingResults = await Promise.all(pageGroups.map(async (group, g) => {
+        const content = [
+          { type: 'text', text: `Drawing sheets ${g*6+1}–${g*6+group.length} of ${drawing.pages.length} from ${drawing.filename}:` },
+          ...group.map(p => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: p.data } })),
+          { type: 'text', text: 'Review these drawing sheets. Return JSON with comments array.' }
+        ]
+        const raw = await claudeCall(DRAWING_REVIEW_SYSTEM, content, 3000)
+        return safeParseJSON(raw, { comments: [] })
+      }))
+
+      for (const result of drawingResults) {
+        allComments.push(...(result.comments || []))
+      }
+    }
+
+    // ── PASS 3: Synthesis ────────────────────────────────────────────────────
+    const synthContent = `
+Cover page / project info:
+${coverText || 'Not available'}
+
+Total comments raised across all review passes: ${allComments.length}
+Critical: ${allComments.filter(c => c.severity === 'critical').length}
+Major: ${allComments.filter(c => c.severity === 'major').length}
+Minor: ${allComments.filter(c => c.severity === 'minor').length}
+Query: ${allComments.filter(c => c.severity === 'query').length}
+Pass: ${allComments.filter(c => c.severity === 'pass').length}
+
+Sample of findings:
+${allComments.slice(0, 10).map(c => `[${c.severity.toUpperCase()}] ${c.member || ''} — ${c.title}`).join('\n')}
+
+Please extract the project ref, title, calc author, and write a synthesis summary. Return JSON.`
+
+    const synthRaw = await claudeCall(SYNTHESIS_SYSTEM, synthContent, 1000)
+    const synthesis = safeParseJSON(synthRaw, {
+      projectRef: null, projectTitle: null, calcBy: null,
+      summary: `Review complete. ${allComments.length} item(s) identified across ${calc ? 'calculations' : ''}${calc && drawing ? ' and ' : ''}${drawing ? 'drawings' : ''}.`
+    })
+
+    // ── Deduplicate comments ─────────────────────────────────────────────────
+    const seen = new Set()
+    const deduped = allComments.filter(c => {
+      const key = `${c.member}|${c.title}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+
+    res.json({
+      projectRef: synthesis.projectRef,
+      projectTitle: synthesis.projectTitle,
+      calcBy: synthesis.calcBy,
+      summary: synthesis.summary,
+      comments: deduped,
+    })
+
   } catch (err) {
     console.error('/api/check-package error:', err)
     res.status(500).json({ error: err.message })
   }
 })
+
 
 // ── PDF report generator ───────────────────────────────────────────────────────
 app.post('/api/check-package/report', async (req, res) => {
