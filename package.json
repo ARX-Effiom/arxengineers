@@ -19,7 +19,7 @@
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "mammoth": "^1.7.0",
-    "pdfkit": "^0.15.0",
+    "pdfkit": "^0.15.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
