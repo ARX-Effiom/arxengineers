@@ -9,7 +9,6 @@ import Contacts from './pages/Contacts'
 import Referrals from './pages/Referrals'
 import Tasks from './pages/Tasks'
 import CalcChecker from './pages/CalcChecker'
-import CalcChecker from './pages/CalcChecker'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: '⬡' },
