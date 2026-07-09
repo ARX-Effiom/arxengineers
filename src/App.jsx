@@ -1,4 +1,3 @@
-
 import { useState } from 'react'
 import './index.css'
 import Dashboard from './pages/Dashboard'
@@ -9,11 +8,14 @@ import Comms from './pages/Comms'
 import Contacts from './pages/Contacts'
 import Referrals from './pages/Referrals'
 import Tasks from './pages/Tasks'
+import CalcChecker from './pages/CalcChecker'
+import CalcChecker from './pages/CalcChecker'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: '⬡' },
   { id: 'projects', label: 'Projects', icon: '📁' },
   { id: 'tasks', label: 'Tasks', icon: '✅' },
+  { id: 'calcchecker', label: 'Calc Checker', icon: '🔍' },
   { id: 'quotes', label: 'Quote Generator', icon: '📝' },
   { id: 'invoices', label: 'Invoices', icon: '💷' },
   { id: 'comms', label: 'Comms', icon: '✉️' },
@@ -28,6 +30,7 @@ export default function App() {
     dashboard: <Dashboard onNavigate={setPage} />,
     projects: <Projects />,
     tasks: <Tasks />,
+    calcchecker: <CalcChecker />,
     quotes: <QuoteGenerator />,
     invoices: <Invoices />,
     comms: <Comms />,
