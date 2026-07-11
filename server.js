@@ -390,25 +390,51 @@ Return ONLY valid JSON, no markdown fences:
     if (drawing) {
       // Step 2a: If we have extracted text, use it for member schedule extraction first
       if (drawing.textContent && drawing.textContent.trim()) {
+        // Diagnostic: dump first slice of drawing text so we can see what actually arrived
+        console.log('── DRAWING TEXT PREVIEW (first 2500 chars) ──')
+        console.log(drawing.textContent.slice(0, 2500))
+        console.log('── END PREVIEW ──')
+
         const SCHEDULE_EXTRACT_SYSTEM = `You are reviewing structural drawing text extracted from an ARX Engineers Ltd drawing package.
-Extract every member from the member schedule. Member schedules list entries like:
-"B-1: 2No. 47x175mm DEEP C24 TIMBERS BOLTED TOGETHER"
-"B-2: 152x152x23 UC"
-"L-1: L1/S 100 STANDARD DUTY LINTEL BY IG"
-"FJ-1: 75x175mm DEEP C24 JOISTS @400mm CRS"
-"C-1: 203x203x46 UC COLUMN"
 
-Also extract connection schedule entries (CD-1, CD-2 etc.) and padstone schedule (PS-1, PS-2 etc.).
+The text was extracted from a Bluebeam-marked PDF via PDF.js annotation extraction, so it may be FRAGMENTED — individual text boxes come out separately and NOT in reading order. You may see something like:
 
-Return ONLY valid JSON, no markdown:
-{"members": [{"ref": "B-1", "scheduledSize": "2No. 47x175mm DEEP C24 TIMBERS BOLTED TOGETHER", "type": "timber beam"}], "connections": [{"ref": "CD-1", "description": "..."}], "padstones": [{"ref": "PS-1", "description": "..."}]}`
+"B-1"
+"2No. 47x175mm C24 TIMBERS BOLTED TOGETHER"
+"[Annotations]"
+"Text — B-2"
+"Text — 152x152x23 UC"
+
+Reconstruct the member schedule by pairing member references with their nearby section-size descriptions. Look for ANY token that matches these patterns:
+- Beams: B-1, B-2, B-3 ... or B1, B2 ...
+- Rafters: R-1, R-2 ...
+- Joists: FJ-1, FJ-2, CJ-1, HR-1 ...
+- Lintels: L-1, L-2 ...
+- Columns/Posts: C-1, C-2, P-1, P-2 ...
+- Padstones: PS-1, PS-2 ...
+- Connection details: CD-1, CD-2 ...
+
+For each, find the associated section size or spec that appears NEAR it in the text (Bluebeam text boxes for a schedule row often sit adjacent to each other in extraction order even if the reading order is jumbled).
+
+Be GENEROUS — if a reference like "B-1" appears at all in the drawing text, list it with whatever spec you can associate with it (or empty string if nothing found nearby).
+
+Return ONLY valid JSON, no markdown, no code fences:
+{"members": [{"ref": "B-1", "scheduledSize": "2No. 47x175mm C24", "type": "timber beam"}], "connections": [{"ref": "CD-1", "description": "..."}], "padstones": [{"ref": "PS-1", "description": "..."}]}`
 
         const scheduleRaw = await claudeCall(SCHEDULE_EXTRACT_SYSTEM,
-          `Extract member schedule from this drawing text:\n\n${drawing.textContent.slice(0, 30000)}`, 2000)
+          `Extract member schedule from this drawing text (may be fragmented / out of reading order):\n\n${drawing.textContent.slice(0, 50000)}`, 3000)
+
+        console.log('── SCHEDULE EXTRACT RAW RESPONSE (first 1500 chars) ──')
+        console.log(scheduleRaw?.slice(0, 1500))
+        console.log('── END RAW ──')
+
         const scheduleData = safeParseJSON(scheduleRaw, { members: [], connections: [], padstones: [] })
-        
-        console.log(`Drawing schedule extracted: ${scheduleData.members?.length || 0} members`)
-        
+
+        console.log(`Drawing schedule extracted: ${scheduleData.members?.length || 0} members, ${scheduleData.connections?.length || 0} connections, ${scheduleData.padstones?.length || 0} padstones`)
+        if (scheduleData.members?.length) {
+          console.log('Members found:', scheduleData.members.map(m => m.ref).join(', '))
+        }
+
         // Add pass comments for each drawing schedule member (for cross-referencing)
         for (const m of (scheduleData.members || [])) {
           allComments.push({
@@ -416,7 +442,7 @@ Return ONLY valid JSON, no markdown:
             member: m.ref,
             clause: null,
             title: `Drawing schedule entry confirmed: ${m.ref}`,
-            detail: `Member ${m.ref} found in drawing member schedule: ${m.scheduledSize}`,
+            detail: `Member ${m.ref} found in drawing member schedule: ${m.scheduledSize || '(size not identifiable in extracted text)'}`,
             recommendation: null,
             _drawingSize: m.scheduledSize, // internal use for cross-ref
           })
