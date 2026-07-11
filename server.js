@@ -388,140 +388,200 @@ Please extract the project ref, title, calc author, and write a synthesis summar
 })
 
 
-// ── PDF report generator ───────────────────────────────────────────────────────
+// ── PDF report generator ─────────────────────────────────────────────────────
 app.post('/api/check-package/report', async (req, res) => {
   const { results, calcFilename, drawingFilename } = req.body
   if (!results) return res.status(400).json({ error: 'No results provided' })
 
   try {
-    const doc = new PDFDocument({ margin: 50, size: 'A4' })
+    const MARGIN = 50
+    const PAGE_W = 595
+    const CONTENT_W = PAGE_W - MARGIN * 2  // 495
+    const PURPLE = '#5B2D8E'
+    const GREY = '#6B7280'
+    const LIGHT_GREY = '#E5E7EB'
+    const SEV = {
+      critical: { label: 'CRITICAL', color: '#DC2626', bg: '#FEF2F2', border: '#FECACA' },
+      major:    { label: 'MAJOR',    color: '#EA580C', bg: '#FFF7ED', border: '#FED7AA' },
+      minor:    { label: 'MINOR',    color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
+      query:    { label: 'QUERY',    color: '#2563EB', bg: '#EFF6FF', border: '#BFDBFE' },
+      pass:     { label: 'PASS',     color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' },
+    }
+
+    const doc = new PDFDocument({ margin: MARGIN, size: 'A4', bufferPages: true })
     const chunks = []
     doc.on('data', c => chunks.push(c))
 
-    const PURPLE_HEX = '#5B2D8E'
-    const GREY = '#888888'
-    const SEV_COLORS = {
-      critical: '#DC2626', major: '#EA580C', minor: '#D97706',
-      query: '#2563EB', pass: '#16A34A'
+    // ── helpers ────────────────────────────────────────────────────────────
+    const ensureSpace = (needed) => {
+      if (doc.y + needed > 780) doc.addPage()
     }
 
-    // ── Header ───────────────────────────────────────────────────────────────
-    doc.fontSize(20).fillColor(PURPLE_HEX).font('Helvetica-Bold')
-      .text('ARX Engineers Ltd', 50, 50, { align: 'right' })
-    doc.fontSize(9).fillColor(GREY).font('Helvetica')
-      .text('Structural Review Note', { align: 'right' })
+    const hRule = (color = LIGHT_GREY, weight = 0.5) => {
+      doc.moveTo(MARGIN, doc.y).lineTo(PAGE_W - MARGIN, doc.y)
+        .strokeColor(color).lineWidth(weight).stroke()
+      doc.moveDown(0.4)
+    }
 
-    doc.moveTo(50, 95).lineTo(545, 95).strokeColor(PURPLE_HEX).lineWidth(1.5).stroke()
+    const sectionHeading = (text) => {
+      doc.moveDown(0.3)
+      doc.fontSize(10).font('Helvetica-Bold').fillColor(PURPLE).text(text.toUpperCase(), MARGIN, doc.y, { width: CONTENT_W })
+      doc.moveDown(0.2)
+      doc.moveTo(MARGIN, doc.y).lineTo(PAGE_W - MARGIN, doc.y).strokeColor(PURPLE).lineWidth(1).stroke()
+      doc.moveDown(0.4)
+    }
 
-    doc.fontSize(16).fillColor(PURPLE_HEX).font('Helvetica-Bold').moveDown(0.5)
-      .text('STRUCTURAL CALCULATION & DRAWING REVIEW')
-    doc.fontSize(10).fillColor('#374151').font('Helvetica').moveDown(0.3)
+    // ── PAGE HEADER ─────────────────────────────────────────────────────────
+    // Purple bar at top
+    doc.rect(0, 0, PAGE_W, 36).fill(PURPLE)
+    doc.fontSize(14).font('Helvetica-Bold').fillColor('white')
+      .text('ARX Engineers Ltd', MARGIN, 11, { width: CONTENT_W / 2 })
+    doc.fontSize(9).font('Helvetica').fillColor('rgba(255,255,255,0.7)')
+      .text('Structural Review Note', MARGIN, 23, { width: CONTENT_W / 2 })
+    doc.fontSize(9).font('Helvetica').fillColor('white')
+      .text('Aim For Excellence', MARGIN, 17, { width: CONTENT_W, align: 'right' })
 
-    if (results.projectRef || results.projectTitle) {
-      doc.fontSize(11).font('Helvetica-Bold').fillColor('#1A1A1A')
-        .text(`${results.projectRef || ''} ${results.projectTitle || ''}`.trim())
+    doc.y = 52
+
+    // Project info block
+    const projectLine = [results.projectRef, results.projectTitle].filter(Boolean).join('  —  ')
+    if (projectLine) {
+      doc.fontSize(13).font('Helvetica-Bold').fillColor('#1A1A1A')
+        .text(projectLine, MARGIN, doc.y, { width: CONTENT_W })
+      doc.moveDown(0.3)
     }
 
     const dateStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })
-    doc.fontSize(9).fillColor(GREY).font('Helvetica')
-      .text(`Review date: ${dateStr}`)
-
-    if (calcFilename) doc.text(`Calculations: ${calcFilename}`)
-    if (drawingFilename) doc.text(`Drawings: ${drawingFilename}`)
-    if (results.calcBy) doc.text(`Prepared by: ${results.calcBy}`)
-
+    doc.fontSize(8).font('Helvetica').fillColor(GREY)
+    if (results.calcBy) doc.text(`Calc by: ${results.calcBy}     Review date: ${dateStr}`, MARGIN, doc.y, { width: CONTENT_W })
+    else doc.text(`Review date: ${dateStr}`, MARGIN, doc.y, { width: CONTENT_W })
+    doc.moveDown(0.2)
+    if (calcFilename) doc.text(`Calculations: ${calcFilename}`, MARGIN, doc.y, { width: CONTENT_W })
+    if (drawingFilename) doc.text(`Drawings: ${drawingFilename}`, MARGIN, doc.y, { width: CONTENT_W })
     doc.moveDown(0.5)
-    doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#CCCCCC').lineWidth(0.5).stroke()
-    doc.moveDown(0.5)
+    hRule(LIGHT_GREY, 0.5)
 
-    // ── Summary ──────────────────────────────────────────────────────────────
-    doc.fontSize(11).font('Helvetica-Bold').fillColor(PURPLE_HEX).text('REVIEW SUMMARY')
-    doc.moveDown(0.3)
-    doc.fontSize(10).font('Helvetica').fillColor('#374151').text(results.summary || 'See comments below.', { width: 495 })
-    doc.moveDown(0.5)
+    // ── SUMMARY OF FINDINGS (stat boxes) ────────────────────────────────────
+    sectionHeading('Summary of Findings')
 
-    // ── Stats ────────────────────────────────────────────────────────────────
     const comments = results.comments || []
     const counts = { critical: 0, major: 0, minor: 0, query: 0, pass: 0 }
     comments.forEach(c => { if (counts[c.severity] !== undefined) counts[c.severity]++ })
 
-    doc.fontSize(11).font('Helvetica-Bold').fillColor(PURPLE_HEX).text('SUMMARY OF FINDINGS')
-    doc.moveDown(0.3)
+    // Draw 5 stat boxes side by side
+    const boxW = 89
+    const boxH = 44
+    const boxGap = 6
+    let bx = MARGIN
+    const by = doc.y
 
-    const sevLabels = { critical: 'Critical', major: 'Major', minor: 'Minor', query: 'Query', pass: 'Pass' }
-    Object.entries(counts).forEach(([k, v]) => {
-      if (v > 0) {
-        doc.fontSize(10).font('Helvetica-Bold').fillColor(SEV_COLORS[k])
-          .text(`${sevLabels[k]}: `, { continued: true })
-        doc.font('Helvetica').fillColor('#374151').text(`${v} item${v !== 1 ? 's' : ''}`)
-      }
+    Object.entries(SEV).forEach(([key, sev]) => {
+      const count = counts[key]
+      // Box background
+      doc.roundedRect(bx, by, boxW, boxH, 4).fill(sev.bg)
+      doc.roundedRect(bx, by, boxW, boxH, 4).stroke(sev.border).lineWidth(0.5)
+      // Count
+      doc.fontSize(22).font('Helvetica-Bold').fillColor(sev.color)
+        .text(String(count), bx + 8, by + 5, { width: boxW - 16, align: 'center' })
+      // Label
+      doc.fontSize(7.5).font('Helvetica-Bold').fillColor(sev.color)
+        .text(sev.label, bx + 4, by + 30, { width: boxW - 8, align: 'center' })
+      bx += boxW + boxGap
     })
-    doc.moveDown(0.5)
-    doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#CCCCCC').lineWidth(0.5).stroke()
-    doc.moveDown(0.5)
 
-    // ── Comments ─────────────────────────────────────────────────────────────
-    doc.fontSize(11).font('Helvetica-Bold').fillColor(PURPLE_HEX).text('DETAILED COMMENTS')
-    doc.moveDown(0.3)
+    doc.y = by + boxH + 14
+
+    // ── REVIEW SUMMARY ───────────────────────────────────────────────────────
+    if (results.summary) {
+      sectionHeading('Review Summary')
+      doc.fontSize(9.5).font('Helvetica').fillColor('#374151')
+        .text(results.summary, MARGIN, doc.y, { width: CONTENT_W, lineGap: 2 })
+      doc.moveDown(0.6)
+    }
+
+    // ── DETAILED COMMENTS ────────────────────────────────────────────────────
+    sectionHeading('Detailed Comments')
 
     const sevOrder = ['critical', 'major', 'minor', 'query', 'pass']
     const sorted = [...comments].sort((a, b) =>
       sevOrder.indexOf(a.severity) - sevOrder.indexOf(b.severity)
     )
 
-    sorted.forEach((c, i) => {
-      if (doc.y > 720) doc.addPage()
+    sorted.forEach((c, idx) => {
+      const sev = SEV[c.severity] || SEV.query
 
-      const color = SEV_COLORS[c.severity] || '#374151'
-      const label = sevLabels[c.severity] || c.severity
+      // Estimate height needed: header ~20, title ~16, detail ~varies, rec ~varies
+      const detailLines = Math.ceil((c.detail || '').length / 90)
+      const recLines = c.recommendation ? Math.ceil(c.recommendation.length / 90) : 0
+      const estHeight = 20 + 18 + (detailLines * 12) + (recLines ? 12 + recLines * 12 : 0) + 20
 
-      // Comment number + severity
-      doc.fontSize(9).font('Helvetica-Bold').fillColor(color)
-        .text(`[${label.toUpperCase()}]`, { continued: true })
+      ensureSpace(estHeight)
+
+      const cardTop = doc.y
+      const cardX = MARGIN
+
+      // Left severity stripe (4px wide)
+      doc.rect(cardX, cardTop, 4, estHeight).fill(sev.color)
+
+      // Card background
+      doc.rect(cardX + 4, cardTop, CONTENT_W - 4, estHeight).fill(sev.bg)
+
+      // Header row: severity badge + member + clause
+      let headerY = cardTop + 7
+      doc.fontSize(7.5).font('Helvetica-Bold').fillColor('white')
+      // Severity badge
+      const badgeW = doc.widthOfString(sev.label) + 10
+      doc.roundedRect(cardX + 10, headerY - 2, badgeW, 13, 2).fill(sev.color)
+      doc.text(sev.label, cardX + 15, headerY, { lineBreak: false })
+
+      let headerX = cardX + 10 + badgeW + 6
       if (c.member) {
-        doc.fillColor(PURPLE_HEX).text(` ${c.member}`, { continued: true })
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#1A1A1A')
+          .text(c.member, headerX, headerY, { lineBreak: false })
+        headerX += doc.widthOfString(c.member) + 6
       }
       if (c.clause) {
-        doc.fillColor(GREY).font('Helvetica').text(` — ${c.clause}`, { continued: true })
+        doc.fontSize(7.5).font('Helvetica').fillColor(GREY)
+          .text(c.clause, headerX, headerY, { width: cardX + CONTENT_W - headerX - 8, lineBreak: false })
       }
-      doc.text('')
 
       // Title
-      doc.fontSize(10).font('Helvetica-Bold').fillColor('#1A1A1A').text(c.title, { width: 495 })
-      doc.moveDown(0.2)
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor('#1A1A1A')
+        .text(c.title || '', cardX + 10, cardTop + 22, { width: CONTENT_W - 20 })
 
       // Detail
-      doc.fontSize(9).font('Helvetica').fillColor('#374151').text(c.detail, { width: 495 })
+      doc.moveDown(0.2)
+      doc.fontSize(8.5).font('Helvetica').fillColor('#374151')
+        .text(c.detail || '', cardX + 10, doc.y, { width: CONTENT_W - 20, lineGap: 1.5 })
 
-      // Recommendation
+      // Recommendation box
       if (c.recommendation) {
-        doc.moveDown(0.2)
-        doc.fontSize(9).font('Helvetica-Bold').fillColor('#374151')
-          .text('Recommendation: ', { continued: true })
-        doc.font('Helvetica').text(c.recommendation, { width: 440 })
+        doc.moveDown(0.3)
+        const recY = doc.y
+        doc.rect(cardX + 10, recY, CONTENT_W - 20, 1).fill('#D1D5DB') // thin rule
+        doc.moveDown(0.25)
+        doc.fontSize(7.5).font('Helvetica-Bold').fillColor(sev.color)
+          .text('ACTION: ', cardX + 10, doc.y, { lineBreak: false })
+        doc.fontSize(8).font('Helvetica').fillColor('#374151')
+          .text(c.recommendation, cardX + 10 + doc.widthOfString('ACTION: ') + 2, doc.y - doc.currentLineHeight(), { width: CONTENT_W - 20 - doc.widthOfString('ACTION: ') - 4, lineGap: 1.5 })
       }
 
-      doc.moveDown(0.4)
-      if (i < sorted.length - 1) {
-        doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#E5E7EB').lineWidth(0.3).stroke()
-        doc.moveDown(0.3)
-      }
+      doc.y = cardTop + estHeight + 6
+      if (doc.y > 750) doc.addPage()
     })
 
-    // ── Footer ────────────────────────────────────────────────────────────────
-    doc.moveDown(1)
-    doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#CCCCCC').lineWidth(0.5).stroke()
-    doc.moveDown(0.3)
-    doc.fontSize(8).fillColor(GREY).font('Helvetica')
-      .text(
-        'This review note has been generated with AI assistance and reviewed by ARX Engineers Ltd. ' +
-        'It is intended as an internal quality check and does not replace the engineer\'s professional judgement. ' +
-        'ARX Engineers Ltd | Company No. 16198467 | www.arxengineers.co.uk',
-        { width: 495, align: 'center' }
-      )
+    // ── FOOTER on each page ─────────────────────────────────────────────────
+    const totalPages = doc.bufferedPageRange().count
+    for (let i = 0; i < totalPages; i++) {
+      doc.switchToPage(i)
+      doc.fontSize(7).font('Helvetica').fillColor(GREY)
+        .text(
+          `ARX Engineers Ltd  |  Co. No. 16198467  |  www.arxengineers.co.uk  |  AI-assisted review — does not replace engineer judgement  |  Page ${i + 1} of ${totalPages}`,
+          MARGIN, 820, { width: CONTENT_W, align: 'center' }
+        )
+    }
 
     doc.end()
-
     await new Promise(resolve => doc.on('end', resolve))
 
     const pdfBuffer = Buffer.concat(chunks)
