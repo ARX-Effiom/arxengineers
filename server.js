@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 4173
 const isProd = process.env.NODE_ENV === 'production'
 
 app.use(cors())
-app.use(express.json({ limit: '10mb' }))
+app.use(express.json({ limit: '50mb' }))
 
 // ── Anthropic proxy ──────────────────────────────────────────────
 app.post('/api/claude', async (req, res) => {
@@ -117,6 +117,9 @@ app.post('/api/check-package', async (req, res) => {
 
   const { calc, drawing } = req.body
   if (!calc && !drawing) return res.status(400).json({ error: 'No files provided' })
+
+  // Debug: log what arrived
+  console.log(`check-package received — calc: ${calc ? calc.type + ' ' + calc.filename : 'none'}, drawing: ${drawing ? drawing.filename + ' pages:' + drawing.pages?.length + ' textLen:' + (drawing.textContent?.length || 0) : 'none'}`)
 
   // ── ARX standard values baked in for calibration ──────────────────────────
   const ARX_STANDARDS = `
