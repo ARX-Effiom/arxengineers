@@ -65,6 +65,20 @@ function readFileAsArrayBuffer(file) {
   })
 }
 
+// Extract selectable text from a PDF — gets member schedules, notes, annotations
+async function extractPdfText(file) {
+  await loadPdfJs()
+  const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
+  const pageTexts = []
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i)
+    const textContent = await page.getTextContent()
+    const pageText = textContent.items.map(item => item.str).join(' ')
+    if (pageText.trim()) pageTexts.push(`--- Page ${i} ---\n${pageText}`)
+  }
+  return pageTexts.join('\n\n')
+}
+
 // ─── Upload zone ──────────────────────────────────────────────────────────────
 function UploadZone({ label, accept, icon, file, onFile, hint }) {
   const [dragging, setDragging] = useState(false)
@@ -219,9 +233,17 @@ export default function CalcChecker() {
       // ── Prepare drawing file ───────────────────────────────────────────────
       let drawingPayload = null
       if (drawingFile) {
+        // Extract text layer first — reliably gets member schedules regardless of image scale
+        setStatus({ type: 'loading', msg: 'Extracting drawing text (member schedules, notes)…' })
+        const drawingText = await extractPdfText(drawingFile).catch(() => '')
+        // Then rasterise for visual review
         setStatus({ type: 'loading', msg: 'Rasterising drawing PDF…' })
         const pages = await rasterisePDF(drawingFile, msg => setStatus({ type: 'loading', msg }))
-        drawingPayload = { pages: pages.map(p => ({ data: p.dataUrl.split(',')[1], pageNum: p.pageNum })), filename: drawingFile.name }
+        drawingPayload = {
+          pages: pages.map(p => ({ data: p.dataUrl.split(',')[1], pageNum: p.pageNum })),
+          filename: drawingFile.name,
+          textContent: drawingText,
+        }
       }
 
       setStatus({ type: 'loading', msg: 'Sending to review agent…' })
