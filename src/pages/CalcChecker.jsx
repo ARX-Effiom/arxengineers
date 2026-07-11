@@ -65,34 +65,97 @@ function readFileAsArrayBuffer(file) {
   })
 }
 
-// Extract selectable text from a PDF — gets member schedules, notes, annotations
+// Extract selectable text from a PDF — gets member schedules, notes, annotations.
+// Tries THREE methods to handle Bluebeam markup PDFs where schedule text lives
+// in annotations rather than in content streams:
+//   1. page.getTextContent()   — standard text streams
+//   2. page.getAnnotations()   — Bluebeam markup, callouts, schedule text boxes
+//   3. pdf.allXfaHtml          — XFA form data (rich-text fallback)
 async function extractPdfText(file) {
   try {
     await loadPdfJs()
-    console.log('[extractPdfText] pdf.js loaded, version:', window.pdfjsLib?.version)
+    console.log('[extractPdfText] pdf.js version:', window.pdfjsLib?.version)
     const buf = await file.arrayBuffer()
-    // Wrap in Uint8Array — some pdf.js builds require typed array, not raw ArrayBuffer
-    const pdf = await window.pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise
-    console.log('[extractPdfText] pdf loaded, pages:', pdf.numPages)
+    const pdf = await window.pdfjsLib.getDocument({
+      data: new Uint8Array(buf),
+      enableXfa: true,
+    }).promise
+    console.log('[extractPdfText] loaded,', pdf.numPages, 'pages')
+
     const pageTexts = []
+
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i)
-      const textContent = await page.getTextContent()
-      // Filter to items with .str — defends against TextMarkedContent items in newer pdf.js
-      const pageText = textContent.items
-        .filter(it => typeof it.str === 'string')
-        .map(it => it.str)
-        .join(' ')
-      console.log(`[extractPdfText] page ${i}: ${textContent.items.length} items, ${pageText.length} chars`)
+      const parts = []
+
+      // Method 1: standard text streams
+      try {
+        const tc = await page.getTextContent()
+        const t = tc.items
+          .filter(it => typeof it.str === 'string')
+          .map(it => it.str)
+          .join(' ')
+        console.log(`[extractPdfText] p${i} textContent: ${tc.items.length} items, ${t.length} chars`)
+        if (t.trim()) parts.push(t)
+      } catch (e) {
+        console.warn(`[extractPdfText] p${i} getTextContent error:`, e?.message)
+      }
+
+      // Method 2: annotations (Bluebeam markup, callouts, text boxes)
+      try {
+        const anns = await page.getAnnotations()
+        const at = anns
+          .map(a => {
+            const bits = []
+            if (a.title) bits.push(a.title)
+            if (a.contents) bits.push(a.contents)
+            if (a.contentsObj?.str) bits.push(a.contentsObj.str)
+            if (a.richText?.str) bits.push(a.richText.str)
+            return bits.join(' — ')
+          })
+          .filter(Boolean)
+          .join('\n')
+        console.log(`[extractPdfText] p${i} annotations: ${anns.length} objs, ${at.length} chars`)
+        if (at.trim()) parts.push('[Annotations]\n' + at)
+      } catch (e) {
+        console.warn(`[extractPdfText] p${i} getAnnotations error:`, e?.message)
+      }
+
+      const pageText = parts.join('\n\n')
       if (pageText.trim()) pageTexts.push(`--- Page ${i} ---\n${pageText}`)
     }
+
+    // Method 3: XFA fallback — flatten allXfaHtml if we still have nothing
+    if (pageTexts.length === 0) {
+      console.log('[extractPdfText] no text from streams/annotations, trying XFA')
+      try {
+        const xfa = pdf.allXfaHtml
+        if (xfa) {
+          const flatten = (n) => {
+            if (!n) return ''
+            if (typeof n === 'string') return n + ' '
+            let out = ''
+            if (typeof n.value === 'string') out += n.value + ' '
+            if (Array.isArray(n.children)) out += n.children.map(flatten).join('')
+            return out
+          }
+          const xfaText = flatten(xfa).trim()
+          console.log(`[extractPdfText] XFA text: ${xfaText.length} chars`)
+          if (xfaText) pageTexts.push('[XFA]\n' + xfaText)
+        } else {
+          console.log('[extractPdfText] no XFA content available')
+        }
+      } catch (e) {
+        console.warn('[extractPdfText] XFA fallback error:', e?.message)
+      }
+    }
+
     const result = pageTexts.join('\n\n')
-    console.log('[extractPdfText] total text length:', result.length)
+    console.log('[extractPdfText] TOTAL:', result.length, 'chars')
     return result
   } catch (err) {
     console.error('[extractPdfText] FAILED:', err)
-    console.error('[extractPdfText] error message:', err?.message)
-    console.error('[extractPdfText] error stack:', err?.stack)
+    console.error('[extractPdfText] message:', err?.message)
     return ''
   }
 }
