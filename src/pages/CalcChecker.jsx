@@ -67,16 +67,34 @@ function readFileAsArrayBuffer(file) {
 
 // Extract selectable text from a PDF — gets member schedules, notes, annotations
 async function extractPdfText(file) {
-  await loadPdfJs()
-  const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
-  const pageTexts = []
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i)
-    const textContent = await page.getTextContent()
-    const pageText = textContent.items.map(item => item.str).join(' ')
-    if (pageText.trim()) pageTexts.push(`--- Page ${i} ---\n${pageText}`)
+  try {
+    await loadPdfJs()
+    console.log('[extractPdfText] pdf.js loaded, version:', window.pdfjsLib?.version)
+    const buf = await file.arrayBuffer()
+    // Wrap in Uint8Array — some pdf.js builds require typed array, not raw ArrayBuffer
+    const pdf = await window.pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise
+    console.log('[extractPdfText] pdf loaded, pages:', pdf.numPages)
+    const pageTexts = []
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i)
+      const textContent = await page.getTextContent()
+      // Filter to items with .str — defends against TextMarkedContent items in newer pdf.js
+      const pageText = textContent.items
+        .filter(it => typeof it.str === 'string')
+        .map(it => it.str)
+        .join(' ')
+      console.log(`[extractPdfText] page ${i}: ${textContent.items.length} items, ${pageText.length} chars`)
+      if (pageText.trim()) pageTexts.push(`--- Page ${i} ---\n${pageText}`)
+    }
+    const result = pageTexts.join('\n\n')
+    console.log('[extractPdfText] total text length:', result.length)
+    return result
+  } catch (err) {
+    console.error('[extractPdfText] FAILED:', err)
+    console.error('[extractPdfText] error message:', err?.message)
+    console.error('[extractPdfText] error stack:', err?.stack)
+    return ''
   }
-  return pageTexts.join('\n\n')
 }
 
 // ─── Upload zone ──────────────────────────────────────────────────────────────
@@ -235,7 +253,7 @@ export default function CalcChecker() {
       if (drawingFile) {
         // Extract text layer first — reliably gets member schedules regardless of image scale
         setStatus({ type: 'loading', msg: 'Extracting drawing text (member schedules, notes)…' })
-        const drawingText = await extractPdfText(drawingFile).catch(() => '')
+        const drawingText = await extractPdfText(drawingFile)
         // Then rasterise for visual review
         setStatus({ type: 'loading', msg: 'Rasterising drawing PDF…' })
         const pages = await rasterisePDF(drawingFile, msg => setStatus({ type: 'loading', msg }))
