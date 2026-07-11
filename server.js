@@ -110,6 +110,30 @@ Respond ONLY with valid JSON — no preamble, no markdown fences:
 // ─── /api/check-package ──────────────────────────────────────────────────────
 // Add these endpoints to server.js alongside existing /api/claude and /api/analyse-drawings
 
+// In-memory job store — POST returns jobId immediately, client polls for status.
+// Avoids Railway edge / browser timeouts on long-running (2–3 min) reviews.
+const reviewJobs = new Map()
+
+// Cleanup old jobs every 10 min — remove anything older than 1 hour
+setInterval(() => {
+  const cutoff = Date.now() - 60 * 60 * 1000
+  for (const [id, job] of reviewJobs) {
+    if (job.createdAt < cutoff) reviewJobs.delete(id)
+  }
+}, 10 * 60 * 1000)
+
+// GET status of an in-flight or completed review job
+app.get('/api/check-package/status/:jobId', (req, res) => {
+  const job = reviewJobs.get(req.params.jobId)
+  if (!job) return res.status(404).json({ status: 'not_found' })
+  res.json({
+    status: job.status,       // 'pending' | 'complete' | 'error'
+    progress: job.progress,   // human-readable progress message
+    result: job.result,       // set when status='complete'
+    error: job.error,         // set when status='error'
+  })
+})
+
 // ── Calc & drawing review agent (multi-pass) ──────────────────────────────────
 app.post('/api/check-package', async (req, res) => {
   const apiKey = process.env.ANTHROPIC_API_KEY
@@ -118,8 +142,44 @@ app.post('/api/check-package', async (req, res) => {
   const { calc, drawing } = req.body
   if (!calc && !drawing) return res.status(400).json({ error: 'No files provided' })
 
+  // Create job and kick off work in background (fire-and-forget)
+  const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+  reviewJobs.set(jobId, {
+    status: 'pending',
+    progress: 'Starting review…',
+    createdAt: Date.now(),
+    result: null,
+    error: null,
+  })
+
   // Debug: log what arrived
-  console.log(`check-package received — calc: ${calc ? calc.type + ' ' + calc.filename : 'none'}, drawing: ${drawing ? drawing.filename + ' pages:' + drawing.pages?.length + ' textLen:' + (drawing.textContent?.length || 0) : 'none'}`)
+  console.log(`check-package received [${jobId}] — calc: ${calc ? calc.type + ' ' + calc.filename : 'none'}, drawing: ${drawing ? drawing.filename + ' pages:' + drawing.pages?.length + ' textLen:' + (drawing.textContent?.length || 0) : 'none'}`)
+
+  // Respond IMMEDIATELY with jobId
+  res.json({ jobId })
+
+  // Now do the work in background
+  runReviewJob(jobId, apiKey, calc, drawing).catch(err => {
+    console.error(`[${jobId}] Unhandled error:`, err)
+    const job = reviewJobs.get(jobId)
+    if (job) {
+      job.status = 'error'
+      job.error = err.message || 'Unknown error'
+    }
+  })
+})
+
+// Helper to update job progress from anywhere inside runReviewJob
+function updateJobProgress(jobId, msg) {
+  const job = reviewJobs.get(jobId)
+  if (job && job.status === 'pending') {
+    job.progress = msg
+    console.log(`[${jobId}] ${msg}`)
+  }
+}
+
+// The actual review work — extracted so it can run in the background
+async function runReviewJob(jobId, apiKey, calc, drawing) {
 
   // ── ARX standard values baked in for calibration ──────────────────────────
   const ARX_STANDARDS = `
@@ -342,6 +402,7 @@ Return ONLY valid JSON, no markdown fences:
         const extracted = await mammoth.extractRawText({ buffer })
         calcText = extracted.value
         console.log(`Calc text extracted: ${calcText.length} chars, ~${Math.round(calcText.length/500)} pages`)
+        updateJobProgress(jobId, `Calc extracted (${Math.round(calcText.length/500)} pages) — analysing…`)
         // Override with heading-aware split
         calcText = '__USE_HEADING_SPLIT__'
         calcHeadingChunks = await splitDocxByHeadings(calc.data)
@@ -370,6 +431,7 @@ Return ONLY valid JSON, no markdown fences:
       if (chunks.length > 0) {
         coverText = chunks[0].slice(0, 3000) // cover page is first chunk
         console.log(`Reviewing ${chunks.length} sections`)
+        updateJobProgress(jobId, `Reviewing ${chunks.length} calc sections…`)
 
         const batchSize = 5
         for (let i = 0; i < chunks.length; i += batchSize) {
@@ -431,6 +493,7 @@ Return ONLY valid JSON, no markdown, no code fences:
         const scheduleData = safeParseJSON(scheduleRaw, { members: [], connections: [], padstones: [] })
 
         console.log(`Drawing schedule extracted: ${scheduleData.members?.length || 0} members, ${scheduleData.connections?.length || 0} connections, ${scheduleData.padstones?.length || 0} padstones`)
+        updateJobProgress(jobId, `Drawing schedule: ${scheduleData.members?.length || 0} members found — cross-referencing…`)
         if (scheduleData.members?.length) {
           console.log('Members found:', scheduleData.members.map(m => m.ref).join(', '))
         }
@@ -540,6 +603,7 @@ Cross-reference rules:
       const xref = safeParseJSON(xrefRaw, { comments: [] })
       crossRefComments.push(...(xref.comments || []))
       console.log(`Cross-ref raised ${crossRefComments.length} issues`)
+      updateJobProgress(jobId, `Cross-referencing complete — synthesising final report…`)
     }
 
     // ── PASS 5: Synthesis ──────────────────────────────────────────────────────
@@ -569,19 +633,32 @@ Extract project ref, title, calc author. Write 3-4 sentence summary. Return JSON
       return true
     })
 
-    res.json({
-      projectRef: synthesis.projectRef,
-      projectTitle: synthesis.projectTitle,
-      calcBy: synthesis.calcBy,
-      summary: synthesis.summary,
-      comments: deduped,
-    })
+    // Store result on the job — client polls status endpoint to retrieve it
+    const job = reviewJobs.get(jobId)
+    if (job) {
+      job.status = 'complete'
+      job.progress = 'Complete'
+      job.result = {
+        projectRef: synthesis.projectRef,
+        projectTitle: synthesis.projectTitle,
+        calcBy: synthesis.calcBy,
+        summary: synthesis.summary,
+        comments: deduped,
+      }
+      console.log(`[${jobId}] Review complete — ${deduped.length} comments`)
+    }
 
   } catch (err) {
-    console.error('/api/check-package error:', err)
-    res.status(500).json({ error: err.message })
+    console.error(`[${jobId}] /api/check-package error:`, err)
+    const job = reviewJobs.get(jobId)
+    if (job) {
+      job.status = 'error'
+      job.error = err.message || 'Unknown error'
+    }
   }
-})
+}
+
+// (end of runReviewJob function)
 
 
 // ── PDF report generator ─────────────────────────────────────────────────────
