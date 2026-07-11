@@ -385,7 +385,42 @@ Return ONLY valid JSON, no markdown fences:
 
     // ── PASS 2: Drawing review ───────────────────────────────────────────────
     if (drawing) {
-      // Process all drawing pages in groups of 6
+      // Step 2a: If we have extracted text, use it for member schedule extraction first
+      if (drawing.textContent && drawing.textContent.trim()) {
+        const SCHEDULE_EXTRACT_SYSTEM = `You are reviewing structural drawing text extracted from an ARX Engineers Ltd drawing package.
+Extract every member from the member schedule. Member schedules list entries like:
+"B-1: 2No. 47x175mm DEEP C24 TIMBERS BOLTED TOGETHER"
+"B-2: 152x152x23 UC"
+"L-1: L1/S 100 STANDARD DUTY LINTEL BY IG"
+"FJ-1: 75x175mm DEEP C24 JOISTS @400mm CRS"
+"C-1: 203x203x46 UC COLUMN"
+
+Also extract connection schedule entries (CD-1, CD-2 etc.) and padstone schedule (PS-1, PS-2 etc.).
+
+Return ONLY valid JSON, no markdown:
+{"members": [{"ref": "B-1", "scheduledSize": "2No. 47x175mm DEEP C24 TIMBERS BOLTED TOGETHER", "type": "timber beam"}], "connections": [{"ref": "CD-1", "description": "..."}], "padstones": [{"ref": "PS-1", "description": "..."}]}`
+
+        const scheduleRaw = await claudeCall(SCHEDULE_EXTRACT_SYSTEM,
+          `Extract member schedule from this drawing text:\n\n${drawing.textContent.slice(0, 30000)}`, 2000)
+        const scheduleData = safeParseJSON(scheduleRaw, { members: [], connections: [], padstones: [] })
+        
+        console.log(`Drawing schedule extracted: ${scheduleData.members?.length || 0} members`)
+        
+        // Add pass comments for each drawing schedule member (for cross-referencing)
+        for (const m of (scheduleData.members || [])) {
+          allComments.push({
+            severity: 'pass',
+            member: m.ref,
+            clause: null,
+            title: `Drawing schedule entry confirmed: ${m.ref}`,
+            detail: `Member ${m.ref} found in drawing member schedule: ${m.scheduledSize}`,
+            recommendation: null,
+            _drawingSize: m.scheduledSize, // internal use for cross-ref
+          })
+        }
+      }
+
+      // Step 2b: Visual review of drawing images
       const pageGroups = []
       for (let i = 0; i < drawing.pages.length; i += 6) {
         pageGroups.push(drawing.pages.slice(i, i + 6))
@@ -395,7 +430,7 @@ Return ONLY valid JSON, no markdown fences:
         const content = [
           { type: 'text', text: `Drawing sheets ${g*6+1}–${g*6+group.length} of ${drawing.pages.length} from ${drawing.filename}:` },
           ...group.map(p => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: p.data } })),
-          { type: 'text', text: 'Review these drawing sheets. Return JSON with comments array.' }
+          { type: 'text', text: 'Review these drawing sheets for coordination issues, missing bearings, padstone positions, connection coverage, and title block completeness. Return JSON with comments array.' }
         ]
         const raw = await claudeCall(DRAWING_REVIEW_SYSTEM, content, 3000)
         return safeParseJSON(raw, { comments: [] })
@@ -451,13 +486,26 @@ Return ONLY valid JSON, no markdown:
         .map(c => c.member)
         .filter((v, i, a) => a.indexOf(v) === i)
 
+      // Build drawing schedule map from pass comments that have _drawingSize
+      const drawingSchedule = {}
+      allComments
+        .filter(c => c._drawingSize && c.member)
+        .forEach(c => { drawingSchedule[c.member] = c._drawingSize })
+
       const xrefContent = `Calc members with designed sizes:
 ${calcMembers.map(m => `${m.ref}: ${m.designedSize || 'size not found in calc'} (${m.type || 'structural member'})`).join('\n')}
 
-Member references identified from drawing review:
-${drawingMemberRefs.join(', ') || 'None identified — drawing review may not have extracted refs'}
+Drawing member schedule (extracted directly from drawing text):
+${Object.keys(drawingSchedule).length > 0
+  ? Object.entries(drawingSchedule).map(([ref, size]) => `${ref}: ${size}`).join('\n')
+  : `No schedule extracted. Member refs seen in drawing review: ${drawingMemberRefs.join(', ') || 'none'}`}
 
-Cross-reference the above. Report exact matches with size comparison, and flag any missing in either direction.`
+Cross-reference rules:
+- Match EXACT reference IDs: B-1 in calcs must match B-1 in drawing schedule
+- Compare section sizes exactly: flag any discrepancy between calc designed size and drawing scheduled size
+- Flag any calc member with no drawing schedule entry as MAJOR
+- Flag any drawing schedule member with no corresponding calc as MAJOR
+- Do not invent matches or guess`
 
       const xrefRaw = await claudeCall(XREF_SYSTEM, xrefContent, 3000)
       const xref = safeParseJSON(xrefRaw, { comments: [] })
