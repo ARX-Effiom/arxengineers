@@ -190,16 +190,15 @@ Review the drawings for:
 7. TITLE BLOCK: Is revision, scale, drawing reference complete on every sheet?
 8. WALL DIMENSIONS: Are assumed cavity wall widths consistent throughout?
 
+IMPORTANT: For every member referenced on the drawings (B-1, L-5, C-3, FJ-1 etc.), use that exact reference ID in the "member" field of your comments. This allows exact cross-referencing with the calculation package.
+When you see a member schedule entry like "B-1: 178x102x19 UB STEEL BEAM", create a pass comment with member="B-1" and detail stating the scheduled size. This builds the drawing member list for cross-referencing.
+
 Return ONLY valid JSON, no markdown fences:
-{"comments": [{"severity": "critical|major|minor|query|pass", "member": "member ID or null", "clause": "code clause or null", "title": "concise title", "detail": "specific detail", "recommendation": "action or null"}]}`
+{"comments": [{"severity": "critical|major|minor|query|pass", "member": "exact member ID e.g. B-1 or null", "clause": "code clause or null", "title": "concise title", "detail": "specific detail including scheduled size where relevant", "recommendation": "action or null"}]}`
 
   const SYNTHESIS_SYSTEM = `You are a senior structural engineer writing a final review summary for ARX Engineers Ltd.
-
-You have been given the results of a multi-pass review of a structural calculation package and drawings. Synthesise these findings into:
-1. A 3-4 sentence overall summary of package quality
-2. Any cross-reference issues between calcs and drawings (member IDs, section sizes, spans, bearings)
-3. Identify the project ref, title, and calc author from the cover page text provided
-
+Extract the project reference number (e.g. ARX26059), project title, and calc author from the cover page text.
+Write a 3-4 sentence overall assessment of the package quality, main issues found, and overall recommendation.
 Return ONLY valid JSON, no markdown fences:
 {"projectRef": "string or null", "projectTitle": "string or null", "calcBy": "string or null", "summary": "3-4 sentence summary"}`
 
@@ -237,21 +236,85 @@ Return ONLY valid JSON, no markdown fences:
     }
   }
 
-  // ── Helper: split calc text by member ─────────────────────────────────────
-  function splitByMember(text) {
-    // Split on lines that look like member headings (all caps, short, followed by content)
-    // Patterns: "BEAM B-1", "LINTEL L-5", "FLOOR JOIST FJ-1", "COLUMN C-3", etc.
-    const memberPattern = /\n(?=(BEAM|LINTEL|FLOOR JOIST|ROOF JOIST|CEILING JOIST|COLUMN|POST|TRUSS|RAFTER|FOUNDATION|RAFT|SLAB|WALL|MASONRY|PADSTONE|STAIRCASE|TRIMMER|RIDGE|PURLIN|WINDPOST)[^\n]{0,30}\n)/gi
-    
-    const parts = text.split(memberPattern)
-    
-    // Group into chunks of reasonable size (~15000 chars each)
+  // ── Helper: extract sections from mammoth HTML using heading tags ────────────
+  async function splitDocxByHeadings(base64Data) {
+    const buffer = Buffer.from(base64Data, 'base64')
+
+    // Use mammoth HTML output to detect heading styles
+    const htmlResult = await mammoth.convertToHtml({ buffer })
+    const html = htmlResult.value
+
+    // Also get plain text for the actual content
+    const textResult = await mammoth.extractRawText({ buffer })
+    const fullText = textResult.value
+
+    // Extract headings from HTML (h1-h4 tags = Word heading styles)
+    const headingPattern = /<h[1-4][^>]*>(.*?)<\/h[1-4]>/gi
+    const headings = []
+    let match
+    while ((match = headingPattern.exec(html)) !== null) {
+      // Strip any inner HTML tags from heading text
+      const headingText = match[1].replace(/<[^>]+>/g, '').trim()
+      if (headingText) headings.push(headingText)
+    }
+
+    console.log(`Found ${headings.length} headings:`, headings.slice(0, 20))
+
+    // If no headings found (flat document), fall back to text-based splitting
+    if (headings.length === 0) {
+      return splitByTextPattern(fullText)
+    }
+
+    // Split the plain text at each heading position
+    const chunks = []
+    let remaining = fullText
+
+    for (let i = 0; i < headings.length; i++) {
+      const heading = headings[i]
+      const nextHeading = headings[i + 1]
+      
+      // Find this heading in the remaining text (case-insensitive, flexible whitespace)
+      const headingIdx = remaining.search(new RegExp(heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))
+      if (headingIdx === -1) continue
+
+      const sectionStart = headingIdx
+      let sectionEnd = remaining.length
+
+      if (nextHeading) {
+        const nextIdx = remaining.search(new RegExp(nextHeading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))
+        if (nextIdx > sectionStart) sectionEnd = nextIdx
+      }
+
+      const section = remaining.slice(sectionStart, sectionEnd).trim()
+      if (section.length > 50) chunks.push(section) // skip tiny sections
+      remaining = remaining.slice(sectionStart + 1) // advance past this heading
+    }
+
+    // Group small consecutive chunks together (max 12000 chars per batch)
+    const grouped = []
+    let current = ''
+    for (const chunk of chunks) {
+      if (current.length + chunk.length > 12000 && current.length > 0) {
+        grouped.push(current.trim())
+        current = chunk
+      } else {
+        current += '\n\n' + chunk
+      }
+    }
+    if (current.trim()) grouped.push(current.trim())
+
+    return grouped.length > 0 ? grouped : [fullText.slice(0, 15000)]
+  }
+
+  // ── Fallback: text pattern splitter (for non-headed documents) ─────────────
+  function splitByTextPattern(text) {
+    // Match ALL-CAPS lines of 3-60 chars that look like section headings
+    const parts = text.split(/\n(?=[A-Z][A-Z\s\-:/()0-9]{2,59}\n)/)
     const chunks = []
     let current = ''
-    
     for (const part of parts) {
       if (!part) continue
-      if (current.length + part.length > 15000 && current.length > 0) {
+      if (current.length + part.length > 12000 && current.length > 0) {
         chunks.push(current.trim())
         current = part
       } else {
@@ -259,14 +322,13 @@ Return ONLY valid JSON, no markdown fences:
       }
     }
     if (current.trim()) chunks.push(current.trim())
-    
-    // Always include first chunk (cover page + loading) regardless
     return chunks.length > 0 ? chunks : [text.slice(0, 15000)]
   }
 
   try {
     const allComments = []
     let coverText = ''
+    let calcHeadingChunks = null
 
     // ── PASS 1: Calculation review (chunked by member) ──────────────────────
     if (calc) {
@@ -277,6 +339,10 @@ Return ONLY valid JSON, no markdown fences:
         const extracted = await mammoth.extractRawText({ buffer })
         calcText = extracted.value
         console.log(`Calc text extracted: ${calcText.length} chars, ~${Math.round(calcText.length/500)} pages`)
+        // Override with heading-aware split
+        calcText = '__USE_HEADING_SPLIT__'
+        calcHeadingChunks = await splitDocxByHeadings(calc.data)
+        console.log(`Heading-split into ${calcHeadingChunks.length} sections`)
       } else if (calc.type === 'images') {
         // For PDF calcs, still use image approach but process all pages in groups
         const pageGroups = []
@@ -296,18 +362,17 @@ Return ONLY valid JSON, no markdown fences:
         }
       }
 
-      // For docx: split and review each chunk
-      if (calcText) {
-        coverText = calcText.slice(0, 3000) // save cover for synthesis
-        const chunks = splitByMember(calcText)
-        console.log(`Split into ${chunks.length} chunks for review`)
+      // For docx: use heading-aware chunks
+      const chunks = calcHeadingChunks || (calcText ? splitByTextPattern(calcText) : [])
+      if (chunks.length > 0) {
+        coverText = chunks[0].slice(0, 3000) // cover page is first chunk
+        console.log(`Reviewing ${chunks.length} sections`)
 
-        // Review chunks in parallel (max 5 at a time to avoid rate limits)
         const batchSize = 5
         for (let i = 0; i < chunks.length; i += batchSize) {
           const batch = chunks.slice(i, i + batchSize)
           const batchResults = await Promise.all(batch.map(async (chunk, idx) => {
-            const content = `CALCULATION CHUNK ${i + idx + 1} of ${chunks.length} from ${calc.filename}:\n\n${chunk}\n\nReview this section. Return JSON with comments array.`
+            const content = `CALCULATION SECTION ${i + idx + 1} of ${chunks.length} from ${calc.filename}:\n\n${chunk}\n\nReview this section. Return JSON with comments array.`
             const raw = await claudeCall(MEMBER_REVIEW_SYSTEM, content, 3000)
             return safeParseJSON(raw, { comments: [] })
           }))
@@ -341,32 +406,86 @@ Return ONLY valid JSON, no markdown fences:
       }
     }
 
-    // ── PASS 3: Synthesis ────────────────────────────────────────────────────
-    const synthContent = `
-Cover page / project info:
+    // ── PASS 3: Extract explicit member references from calcs ─────────────────
+    const EXTRACT_MEMBERS_SYSTEM = `You are reviewing a structural calculation package for ARX Engineers Ltd.
+Extract every explicit member reference ID from the calculations.
+Member references follow patterns like: B-1, B-2, C-1, L-1, FJ-1, RJ-1, TR-1, HR-1, CJ-1, P-1, PS-1, CD-1, R-1 etc.
+Also extract the designed/adopted section size from the conclusion of each member calc.
+Look for conclusion lines like "USE 178x102x19 UB", "ADOPT 47x200 C24 @ 400 c/c", "USE 152x152x37 UC".
+Also extract frame groupings e.g. "Frame 1: Beam B-8 & Column C-1" and list each member separately.
+Return ONLY valid JSON, no markdown:
+{"members": [{"ref": "B-1", "type": "steel beam", "designedSize": "178x102x19 UB", "calcSection": "brief what was checked"}]}`
+
+    let calcMembers = []
+    if (calc && calcHeadingChunks && calcHeadingChunks.length > 0) {
+      const allCalcText = calcHeadingChunks.join('\n\n---\n\n').slice(0, 60000)
+      const extractRaw = await claudeCall(EXTRACT_MEMBERS_SYSTEM,
+        `Extract all member references from this calculation package:\n\n${allCalcText}`, 2000)
+      const extracted = safeParseJSON(extractRaw, { members: [] })
+      calcMembers = extracted.members || []
+      console.log(`Extracted ${calcMembers.length} calc members:`, calcMembers.map(m => m.ref))
+    }
+
+    // ── PASS 4: Exact cross-reference calcs vs drawings ───────────────────────
+    const crossRefComments = []
+    if (calc && drawing && calcMembers.length > 0) {
+      const XREF_SYSTEM = `You are cross-referencing structural calculations against structural drawings for ARX Engineers Ltd.
+
+You will be given:
+1. A list of member references extracted from the calculations with their designed section sizes
+2. Member references identified from the drawing review
+
+Rules:
+- Match EXACT reference IDs only: B-1 in calcs must match B-1 in drawings. Do not guess.
+- If a calc has B-1 designed as 178x102x19 UB but the drawing shows B-1 as 152x89x16 UB, that is a MAJOR discrepancy.
+- If a calc member (e.g. C-3) has no corresponding drawing entry, flag as MAJOR — calc member not shown on drawings.
+- If a drawing member has no corresponding calc, flag as MAJOR — undesigned member on drawings.
+- If a frame grouping in calcs says "Frame 1: B-8 & C-1", check B-8 and C-1 individually.
+- Do not invent matches. Only report what you can confirm or flag as missing.
+
+Return ONLY valid JSON, no markdown:
+{"comments": [{"severity": "critical|major|minor|query", "member": "exact ref e.g. B-1", "clause": null, "title": "concise title under 12 words", "detail": "state exact calc size and drawing size or note which is missing", "recommendation": "specific action"}]}`
+
+      const drawingMemberRefs = allComments
+        .filter(c => c.member && /^[A-Z]{1,3}-?\d/.test(c.member))
+        .map(c => c.member)
+        .filter((v, i, a) => a.indexOf(v) === i)
+
+      const xrefContent = `Calc members with designed sizes:
+${calcMembers.map(m => `${m.ref}: ${m.designedSize || 'size not found in calc'} (${m.type || 'structural member'})`).join('\n')}
+
+Member references identified from drawing review:
+${drawingMemberRefs.join(', ') || 'None identified — drawing review may not have extracted refs'}
+
+Cross-reference the above. Report exact matches with size comparison, and flag any missing in either direction.`
+
+      const xrefRaw = await claudeCall(XREF_SYSTEM, xrefContent, 3000)
+      const xref = safeParseJSON(xrefRaw, { comments: [] })
+      crossRefComments.push(...(xref.comments || []))
+      console.log(`Cross-ref raised ${crossRefComments.length} issues`)
+    }
+
+    // ── PASS 5: Synthesis ──────────────────────────────────────────────────────
+    const allFinal = [...allComments, ...crossRefComments]
+    const synthContent = `Cover page / project info:
 ${coverText || 'Not available'}
 
-Total comments raised across all review passes: ${allComments.length}
-Critical: ${allComments.filter(c => c.severity === 'critical').length}
-Major: ${allComments.filter(c => c.severity === 'major').length}
-Minor: ${allComments.filter(c => c.severity === 'minor').length}
-Query: ${allComments.filter(c => c.severity === 'query').length}
-Pass: ${allComments.filter(c => c.severity === 'pass').length}
+Total comments: ${allFinal.length} — Critical: ${allFinal.filter(c=>c.severity==='critical').length}, Major: ${allFinal.filter(c=>c.severity==='major').length}, Minor: ${allFinal.filter(c=>c.severity==='minor').length}, Query: ${allFinal.filter(c=>c.severity==='query').length}, Pass: ${allFinal.filter(c=>c.severity==='pass').length}
+Calc members found: ${calcMembers.map(m=>m.ref).join(', ') || 'none extracted'}
+Sample: ${allFinal.slice(0,6).map(c=>`[${c.severity}] ${c.member||''} ${c.title}`).join('; ')}
 
-Sample of findings:
-${allComments.slice(0, 10).map(c => `[${c.severity.toUpperCase()}] ${c.member || ''} — ${c.title}`).join('\n')}
-
-Please extract the project ref, title, calc author, and write a synthesis summary. Return JSON.`
+Extract project ref, title, calc author. Write 3-4 sentence summary. Return JSON:
+{"projectRef":"string or null","projectTitle":"string or null","calcBy":"string or null","summary":"3-4 sentences"}`
 
     const synthRaw = await claudeCall(SYNTHESIS_SYSTEM, synthContent, 1000)
     const synthesis = safeParseJSON(synthRaw, {
       projectRef: null, projectTitle: null, calcBy: null,
-      summary: `Review complete. ${allComments.length} item(s) identified across ${calc ? 'calculations' : ''}${calc && drawing ? ' and ' : ''}${drawing ? 'drawings' : ''}.`
+      summary: `Review complete. ${allFinal.length} item(s) identified.`
     })
 
-    // ── Deduplicate comments ─────────────────────────────────────────────────
+    // ── Deduplicate ────────────────────────────────────────────────────────────
     const seen = new Set()
-    const deduped = allComments.filter(c => {
+    const deduped = allFinal.filter(c => {
       const key = `${c.member}|${c.title}`
       if (seen.has(key)) return false
       seen.add(key)
