@@ -6,3 +6,6 @@ cmds = ["npm install --legacy-peer-deps"]
 
 [phases.build]
 cmds = ["npm run build"]
+[phases.install]
+# cache-bust: 2026-08-12
+cmds = ["rm -rf node_modules package-lock.json", "npm install --include=optional --force"]
