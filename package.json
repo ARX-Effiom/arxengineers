@@ -1,7 +1,7 @@
 {
   "name": "arx-web",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -30,7 +30,9 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
-    "rollup": "npm:@rollup/wasm-node@^4.20.0",
     "vite": "^5.4.0"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "^4.20.0"
   }
 }
