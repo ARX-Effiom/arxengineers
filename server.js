@@ -319,13 +319,9 @@ const styleMap = [
     "p[style-name='heading 2'] => h2:fresh",
     "p[style-name='heading 3'] => h3:fresh",
     // Confirmed Tedds paragraph styles — verified from ARX26060 Deploy Logs, 12 Aug 2026
-    // Only Calcreference and Calc Title map to headings — they mark top-level member sections.
-    // Other Tedds styles (Calc Section, Calc Subheading etc.) are sub-content within a member
-    // and are deliberately NOT mapped so they don't fragment the chunks.
     "p[style-name='Calcreference'] => h1:fresh",
     "p[style-name='Calc Title'] => h1:fresh",
-  ]
-  ]
+]
 
   const htmlResult = await mammoth.convertToHtml({ buffer }, { styleMap })
   const html = htmlResult.value
