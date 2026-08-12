@@ -300,74 +300,144 @@ Return ONLY valid JSON, no markdown fences:
   }
 
   // ── Helper: extract sections from mammoth HTML using heading tags ────────────
-  async function splitDocxByHeadings(base64Data) {
-    const buffer = Buffer.from(base64Data, 'base64')
+// ── Helper: extract sections from a docx by heading detection ──────────────
+// Two-strategy approach for Tedds calc packages:
+//   1. Mammoth with an expanded style map that also covers likely Tedds style names
+//   2. Regex on raw text keyed off known Tedds/ARX section-header patterns
+// Whichever finds more sections (≥ 3) wins. Regex wins ties — it's more reliable
+// on Tedds output. If both come up short, fall back to splitByTextPattern.
+async function splitDocxByHeadings(base64Data) {
+  const buffer = Buffer.from(base64Data, 'base64')
 
-    // Use mammoth HTML output to detect heading styles
-    const htmlResult = await mammoth.convertToHtml({ buffer })
-    const html = htmlResult.value
+  // Strategy 1: mammoth with expanded style map
+  const styleMap = [
+    // Built-in Word styles
+    "p[style-name='Heading 1'] => h1:fresh",
+    "p[style-name='Heading 2'] => h2:fresh",
+    "p[style-name='Heading 3'] => h3:fresh",
+    "p[style-name='heading 1'] => h1:fresh",
+    "p[style-name='heading 2'] => h2:fresh",
+    "p[style-name='heading 3'] => h3:fresh",
+    // Best-guess Tedds style names — actual name is unknown; log warnings help identify
+    "p[style-name='Tedds Heading'] => h2:fresh",
+    "p[style-name='TeddsHeading'] => h2:fresh",
+    "p[style-name='Tedds Heading 1'] => h1:fresh",
+    "p[style-name='Tedds Heading 2'] => h2:fresh",
+    "p[style-name='Tedds Heading 3'] => h3:fresh",
+    "p[style-name='TeddsHeading1'] => h1:fresh",
+    "p[style-name='TeddsHeading2'] => h2:fresh",
+    "p[style-name='TeddsHeading3'] => h3:fresh",
+    "p[style-name='Tedds Section Heading'] => h2:fresh",
+    "p[style-name='Section Heading'] => h2:fresh",
+    "p[style-name='SectionTitle'] => h2:fresh",
+    "p[style-name='Calc Heading'] => h2:fresh",
+    "p[style-name='CalcHeading'] => h2:fresh",
+  ]
 
-    // Also get plain text for the actual content
-    const textResult = await mammoth.extractRawText({ buffer })
-    const fullText = textResult.value
+  const htmlResult = await mammoth.convertToHtml({ buffer }, { styleMap })
+  const html = htmlResult.value
+  const textResult = await mammoth.extractRawText({ buffer })
+  const fullText = textResult.value
 
-    // Extract headings from HTML (h1-h4 tags = Word heading styles)
-    const headingPattern = /<h[1-4][^>]*>(.*?)<\/h[1-4]>/gi
-    const headings = []
-    let match
-    while ((match = headingPattern.exec(html)) !== null) {
-      // Strip any inner HTML tags from heading text
-      const headingText = match[1].replace(/<[^>]+>/g, '').trim()
-      if (headingText) headings.push(headingText)
+  // Diagnostic: log unmapped styles mammoth encountered — reveals the real Tedds style name
+  if (htmlResult.messages?.length) {
+    const styleWarnings = htmlResult.messages
+      .filter(m => m.type === 'warning' && /style/i.test(m.message))
+      .slice(0, 10)
+      .map(m => m.message)
+    if (styleWarnings.length) {
+      console.log('Unmapped styles seen by mammoth (first 10):', styleWarnings)
     }
-
-    console.log(`Found ${headings.length} headings:`, headings.slice(0, 20))
-
-    // If no headings found (flat document), fall back to text-based splitting
-    if (headings.length === 0) {
-      return splitByTextPattern(fullText)
-    }
-
-    // Split the plain text at each heading position
-    const chunks = []
-    let remaining = fullText
-
-    for (let i = 0; i < headings.length; i++) {
-      const heading = headings[i]
-      const nextHeading = headings[i + 1]
-      
-      // Find this heading in the remaining text (case-insensitive, flexible whitespace)
-      const headingIdx = remaining.search(new RegExp(heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))
-      if (headingIdx === -1) continue
-
-      const sectionStart = headingIdx
-      let sectionEnd = remaining.length
-
-      if (nextHeading) {
-        const nextIdx = remaining.search(new RegExp(nextHeading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))
-        if (nextIdx > sectionStart) sectionEnd = nextIdx
-      }
-
-      const section = remaining.slice(sectionStart, sectionEnd).trim()
-      if (section.length > 50) chunks.push(section) // skip tiny sections
-      remaining = remaining.slice(sectionStart + 1) // advance past this heading
-    }
-
-    // Group small consecutive chunks together (max 12000 chars per batch)
-    const grouped = []
-    let current = ''
-    for (const chunk of chunks) {
-      if (current.length + chunk.length > 12000 && current.length > 0) {
-        grouped.push(current.trim())
-        current = chunk
-      } else {
-        current += '\n\n' + chunk
-      }
-    }
-    if (current.trim()) grouped.push(current.trim())
-
-    return grouped.length > 0 ? grouped : [fullText.slice(0, 15000)]
   }
+
+  // Strategy 1 result: headings from HTML output
+  const headingPattern = /<h[1-4][^>]*>(.*?)<\/h[1-4]>/gi
+  const htmlHeadings = []
+  let match
+  while ((match = headingPattern.exec(html)) !== null) {
+    const headingText = match[1].replace(/<[^>]+>/g, '').trim()
+    if (headingText) htmlHeadings.push(headingText)
+  }
+  console.log(`Style-map strategy found ${htmlHeadings.length} headings`)
+
+  // Strategy 2: regex on raw text keyed on Tedds/ARX section-header patterns
+  const TEDDS_HEADING_RE_GLOBAL = new RegExp([
+    // Member type + ref: BEAM B-1, LINTEL L-2, COLUMN C-1, POST P-1, RAFTER R-1
+    '^(BEAM|LINTEL|COLUMN|POST|RAFTER|JOIST|WALL|SLAB|PLATE|PIER|STUD|TIE)\\s+[A-Z]+-?\\d+.*$',
+    // Frame sections: FRAME 1: BEAM B-3 & COLUMN C-1
+    '^FRAME\\s+\\d+\\s*[:.].*$',
+    // Bearings: B-1 BEARINGS, L-1 BEARINGS
+    '^[A-Z]+-?\\d+\\s+BEARINGS.*$',
+    // Named engineering sections
+    '^(SKETCH FLOOR PLANS|DESIGN LOADINGS|LOADING SUMMARY|MASONRY SIDE PANEL|MASONRY WALL PANEL)$',
+    '^(PAD FOUNDATION|TRENCH FILL FOUNDATION|STRIP FOUNDATION)$',
+    '^(STEEL MASONRY SUPPORT|STEEL COLUMN|STEEL BEAM|STEEL CONNECTION)$',
+    '^(MOMENT CONNECTION|BEAM SPLICE|BASE PLATE|WELDED CONNECTION|BOLTED CONNECTION)$',
+    '^(LATERAL RESTRAINT|BUCKLING CHECK|SHEAR CHECK|DEFLECTION CHECK|POST DESIGN)$',
+    // Cover-page keys: CLIENT: TBC, DESCRIPTION: ..., BRIEF: ...
+    '^(CLIENT|DESCRIPTION|BRIEF|PROJECT|JOB|SECTION)\\s*[:\\-].*$',
+  ].join('|'), 'gm')
+
+  const regexHeadings = []
+  let m
+  while ((m = TEDDS_HEADING_RE_GLOBAL.exec(fullText)) !== null) {
+    regexHeadings.push({ text: m[0].trim(), index: m.index })
+  }
+  console.log(`Regex strategy found ${regexHeadings.length} headings — first 20:`,
+    regexHeadings.slice(0, 20).map(h => h.text))
+
+  // Choose strategy: regex wins if it found ≥ style-map AND ≥ 3. Style-map second. Fallback third.
+  let sections = []
+
+  if (regexHeadings.length >= Math.max(htmlHeadings.length, 3)) {
+    console.log(`Using REGEX strategy (${regexHeadings.length} headings)`)
+    for (let i = 0; i < regexHeadings.length; i++) {
+      const start = regexHeadings[i].index
+      const end = i + 1 < regexHeadings.length ? regexHeadings[i + 1].index : fullText.length
+      const section = fullText.slice(start, end).trim()
+      if (section.length > 50) sections.push(section)
+    }
+  } else if (htmlHeadings.length >= 3) {
+    console.log(`Using STYLE-MAP strategy (${htmlHeadings.length} headings)`)
+    let cursor = 0
+    for (let i = 0; i < htmlHeadings.length; i++) {
+      const heading = htmlHeadings[i]
+      const nextHeading = htmlHeadings[i + 1]
+      const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const headingIdx = fullText.slice(cursor).search(new RegExp(escaped, 'i'))
+      if (headingIdx === -1) continue
+      const absStart = cursor + headingIdx
+      let absEnd = fullText.length
+      if (nextHeading) {
+        const nextEscaped = nextHeading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const nextIdx = fullText.slice(absStart + heading.length).search(new RegExp(nextEscaped, 'i'))
+        if (nextIdx !== -1) absEnd = absStart + heading.length + nextIdx
+      }
+      const section = fullText.slice(absStart, absEnd).trim()
+      if (section.length > 50) sections.push(section)
+      cursor = absEnd
+    }
+  } else {
+    console.log('Both strategies weak — falling back to text-pattern splitter')
+    return splitByTextPattern(fullText)
+  }
+
+  // Group small consecutive sections into ~12k-char batches for Claude context budget
+  const grouped = []
+  let current = ''
+  for (const section of sections) {
+    if (current.length + section.length > 12000 && current.length > 0) {
+      grouped.push(current.trim())
+      current = section
+    } else {
+      current += (current ? '\n\n' : '') + section
+    }
+  }
+  if (current.trim()) grouped.push(current.trim())
+
+  console.log(`Split into ${sections.length} sections, grouped into ${grouped.length} batches`)
+  return grouped.length > 0 ? grouped : [fullText.slice(0, 15000)]
+}
 
   // ── Fallback: text pattern splitter (for non-headed documents) ─────────────
   function splitByTextPattern(text) {
