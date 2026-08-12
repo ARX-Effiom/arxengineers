@@ -378,7 +378,7 @@ const styleMap = [
   // Choose strategy: regex wins if it found ≥ style-map AND ≥ 3. Style-map second. Fallback third.
   let sections = []
 
-  if (regexHeadings.length >= Math.max(htmlHeadings.length, 3)) {
+  if (regexHeadings.length >= 5) {
     console.log(`Using REGEX strategy (${regexHeadings.length} headings)`)
     for (let i = 0; i < regexHeadings.length; i++) {
       const start = regexHeadings[i].index
