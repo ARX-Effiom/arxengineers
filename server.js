@@ -310,7 +310,7 @@ async function splitDocxByHeadings(base64Data) {
   const buffer = Buffer.from(base64Data, 'base64')
 
   // Strategy 1: mammoth with expanded style map
-  const styleMap = [
+const styleMap = [
     // Built-in Word styles
     "p[style-name='Heading 1'] => h1:fresh",
     "p[style-name='Heading 2'] => h2:fresh",
@@ -318,20 +318,13 @@ async function splitDocxByHeadings(base64Data) {
     "p[style-name='heading 1'] => h1:fresh",
     "p[style-name='heading 2'] => h2:fresh",
     "p[style-name='heading 3'] => h3:fresh",
-    // Best-guess Tedds style names — actual name is unknown; log warnings help identify
-    "p[style-name='Tedds Heading'] => h2:fresh",
-    "p[style-name='TeddsHeading'] => h2:fresh",
-    "p[style-name='Tedds Heading 1'] => h1:fresh",
-    "p[style-name='Tedds Heading 2'] => h2:fresh",
-    "p[style-name='Tedds Heading 3'] => h3:fresh",
-    "p[style-name='TeddsHeading1'] => h1:fresh",
-    "p[style-name='TeddsHeading2'] => h2:fresh",
-    "p[style-name='TeddsHeading3'] => h3:fresh",
-    "p[style-name='Tedds Section Heading'] => h2:fresh",
-    "p[style-name='Section Heading'] => h2:fresh",
-    "p[style-name='SectionTitle'] => h2:fresh",
-    "p[style-name='Calc Heading'] => h2:fresh",
-    "p[style-name='CalcHeading'] => h2:fresh",
+    // Confirmed Tedds paragraph styles — verified from ARX26060 Deploy Logs, 12 Aug 2026
+    // Only Calcreference and Calc Title map to headings — they mark top-level member sections.
+    // Other Tedds styles (Calc Section, Calc Subheading etc.) are sub-content within a member
+    // and are deliberately NOT mapped so they don't fragment the chunks.
+    "p[style-name='Calcreference'] => h1:fresh",
+    "p[style-name='Calc Title'] => h1:fresh",
+  ]
   ]
 
   const htmlResult = await mammoth.convertToHtml({ buffer }, { styleMap })
