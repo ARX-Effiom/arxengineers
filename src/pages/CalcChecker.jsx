@@ -329,6 +329,7 @@ export default function CalcChecker() {
 
       setStatus({ type: 'loading', msg: 'Sending to review agent…' })
 
+      // POST: kick off the review, get a jobId back immediately
       const res = await fetch('/api/check-package', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -340,7 +341,47 @@ export default function CalcChecker() {
         throw new Error(err.error || `Server error ${res.status}`)
       }
 
-      const data = await res.json()
+      const { jobId, error: startErr } = await res.json()
+      if (startErr) throw new Error(startErr)
+      if (!jobId) throw new Error('No jobId returned from server')
+
+      // Poll status endpoint until complete/error/timeout
+      const startedAt = Date.now()
+      const MAX_WAIT_MS = 10 * 60 * 1000 // 10 minutes hard cap
+      const POLL_MS = 3000
+
+      let data = null
+      while (true) {
+        if (Date.now() - startedAt > MAX_WAIT_MS) {
+          throw new Error('Review timed out after 10 minutes')
+        }
+        await new Promise(r => setTimeout(r, POLL_MS))
+        let statusRes
+        try {
+          statusRes = await fetch(`/api/check-package/status/${jobId}`)
+        } catch (netErr) {
+          // Transient network error — keep polling; container may be restarting
+          console.warn('[poll] network error, retrying:', netErr?.message)
+          continue
+        }
+        if (!statusRes.ok) {
+          if (statusRes.status === 404) throw new Error('Job not found — server may have restarted')
+          continue
+        }
+        const jobState = await statusRes.json()
+        if (jobState.progress) {
+          setStatus({ type: 'loading', msg: jobState.progress })
+        }
+        if (jobState.status === 'complete') {
+          data = jobState.result
+          break
+        }
+        if (jobState.status === 'error') {
+          throw new Error(jobState.error || 'Review failed on server')
+        }
+        // still pending — loop
+      }
+
       setResults(data)
       setStatus({ type: 'done', msg: `Review complete — ${data.comments?.length || 0} item${data.comments?.length !== 1 ? 's' : ''} raised` })
 
