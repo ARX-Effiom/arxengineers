@@ -1,567 +1,955 @@
-import { useState, useRef, useCallback } from 'react'
+import express from 'express'
+import cors from 'cors'
+import { createServer } from 'vite'
+import path from 'path'
+import { fileURLToPath } from 'url'
+import fs from 'fs'
+import mammoth from 'mammoth'
+import PDFDocument from 'pdfkit'
 
-const PURPLE = '#5B2D8E'
-const PURPLE_DARK = '#3D1F6E'
-const PURPLE_LIGHT = '#F3EEF9'
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const app = express()
+const PORT = process.env.PORT || 4173
+const isProd = process.env.NODE_ENV === 'production'
 
-// ─── severity config ──────────────────────────────────────────────────────────
-const SEVERITY = {
-  critical: { label: 'Critical',  color: '#DC2626', bg: '#FEF2F2', border: '#FECACA', icon: '✕' },
-  major:    { label: 'Major',     color: '#EA580C', bg: '#FFF7ED', border: '#FED7AA', icon: '⚠' },
-  minor:    { label: 'Minor',     color: '#D97706', bg: '#FFFBEB', border: '#FDE68A', icon: '○' },
-  query:    { label: 'Query',     color: '#2563EB', bg: '#EFF6FF', border: '#BFDBFE', icon: '?' },
-  pass:     { label: 'Pass',      color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0', icon: '✓' },
-}
+app.use(cors())
+app.use(express.json({ limit: '50mb' }))
 
-// ─── PDF rasteriser ───────────────────────────────────────────────────────────
-async function loadPdfJs() {
-  if (window.pdfjsLib) return
-  await new Promise((resolve, reject) => {
-    const s = document.createElement('script')
-    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
-    s.onload = () => {
-      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
-      resolve()
-    }
-    s.onerror = reject
-    document.head.appendChild(s)
-  })
-}
+// ── Anthropic proxy ──────────────────────────────────────────────
+app.post('/api/claude', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) return res.status(500).json({ error: 'API key not configured on server' })
 
-async function rasterisePDF(file, onProgress) {
-  await loadPdfJs()
-  const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
-  const pages = []
-  for (let i = 1; i <= pdf.numPages; i++) {
-    onProgress?.(`Rasterising page ${i} of ${pdf.numPages}…`)
-    const page = await pdf.getPage(i)
-    const viewport = page.getViewport({ scale: 1.8 })
-    const canvas = document.createElement('canvas')
-    canvas.width = viewport.width
-    canvas.height = viewport.height
-    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise
-    pages.push({ dataUrl: canvas.toDataURL('image/jpeg', 0.75), pageNum: i })
-  }
-  return pages
-}
-
-// ─── File reader helpers ──────────────────────────────────────────────────────
-function readFileAsBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = e => resolve(e.target.result.split(',')[1])
-    reader.onerror = reject
-    reader.readAsDataURL(file)
-  })
-}
-
-function readFileAsArrayBuffer(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = e => resolve(e.target.result)
-    reader.onerror = reject
-    reader.readAsArrayBuffer(file)
-  })
-}
-
-// Extract selectable text from a PDF — gets member schedules, notes, annotations.
-// Tries THREE methods to handle Bluebeam markup PDFs where schedule text lives
-// in annotations rather than in content streams:
-//   1. page.getTextContent()   — standard text streams
-//   2. page.getAnnotations()   — Bluebeam markup, callouts, schedule text boxes
-//   3. pdf.allXfaHtml          — XFA form data (rich-text fallback)
-async function extractPdfText(file) {
   try {
-    await loadPdfJs()
-    console.log('[extractPdfText] pdf.js version:', window.pdfjsLib?.version)
-    const buf = await file.arrayBuffer()
-    const pdf = await window.pdfjsLib.getDocument({
-      data: new Uint8Array(buf),
-      enableXfa: true,
-    }).promise
-    console.log('[extractPdfText] loaded,', pdf.numPages, 'pages')
-
-    const pageTexts = []
-
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i)
-      const parts = []
-
-      // Method 1: standard text streams
-      try {
-        const tc = await page.getTextContent()
-        const t = tc.items
-          .filter(it => typeof it.str === 'string')
-          .map(it => it.str)
-          .join(' ')
-        console.log(`[extractPdfText] p${i} textContent: ${tc.items.length} items, ${t.length} chars`)
-        if (t.trim()) parts.push(t)
-      } catch (e) {
-        console.warn(`[extractPdfText] p${i} getTextContent error:`, e?.message)
-      }
-
-      // Method 2: annotations (Bluebeam markup, callouts, text boxes)
-      try {
-        const anns = await page.getAnnotations()
-        const at = anns
-          .map(a => {
-            const bits = []
-            if (a.title) bits.push(a.title)
-            if (a.contents) bits.push(a.contents)
-            if (a.contentsObj?.str) bits.push(a.contentsObj.str)
-            if (a.richText?.str) bits.push(a.richText.str)
-            return bits.join(' — ')
-          })
-          .filter(Boolean)
-          .join('\n')
-        console.log(`[extractPdfText] p${i} annotations: ${anns.length} objs, ${at.length} chars`)
-        if (at.trim()) parts.push('[Annotations]\n' + at)
-      } catch (e) {
-        console.warn(`[extractPdfText] p${i} getAnnotations error:`, e?.message)
-      }
-
-      const pageText = parts.join('\n\n')
-      if (pageText.trim()) pageTexts.push(`--- Page ${i} ---\n${pageText}`)
-    }
-
-    // Method 3: XFA fallback — flatten allXfaHtml if we still have nothing
-    if (pageTexts.length === 0) {
-      console.log('[extractPdfText] no text from streams/annotations, trying XFA')
-      try {
-        const xfa = pdf.allXfaHtml
-        if (xfa) {
-          const flatten = (n) => {
-            if (!n) return ''
-            if (typeof n === 'string') return n + ' '
-            let out = ''
-            if (typeof n.value === 'string') out += n.value + ' '
-            if (Array.isArray(n.children)) out += n.children.map(flatten).join('')
-            return out
-          }
-          const xfaText = flatten(xfa).trim()
-          console.log(`[extractPdfText] XFA text: ${xfaText.length} chars`)
-          if (xfaText) pageTexts.push('[XFA]\n' + xfaText)
-        } else {
-          console.log('[extractPdfText] no XFA content available')
-        }
-      } catch (e) {
-        console.warn('[extractPdfText] XFA fallback error:', e?.message)
-      }
-    }
-
-    const result = pageTexts.join('\n\n')
-    console.log('[extractPdfText] TOTAL:', result.length, 'chars')
-    return result
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(req.body),
+    })
+    const data = await response.json()
+    res.status(response.status).json(data)
   } catch (err) {
-    console.error('[extractPdfText] FAILED:', err)
-    console.error('[extractPdfText] message:', err?.message)
-    return ''
+    res.status(500).json({ error: err.message })
   }
-}
+})
 
-// ─── Upload zone ──────────────────────────────────────────────────────────────
-function UploadZone({ label, accept, icon, file, onFile, hint }) {
-  const [dragging, setDragging] = useState(false)
-  const ref = useRef()
+// ── Drawing analyser ─────────────────────────────────────────────
+app.post('/api/analyse-drawings', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) return res.status(500).json({ error: 'API key not configured on server' })
 
-  const handle = f => {
-    if (f) onFile(f)
-  }
+  const { images, pageLabel } = req.body
+  if (!images || !images.length) return res.status(400).json({ error: 'No images provided' })
 
-  return (
-    <div
-      onClick={() => !file && ref.current?.click()}
-      onDragOver={e => { e.preventDefault(); setDragging(true) }}
-      onDragLeave={() => setDragging(false)}
-      onDrop={e => { e.preventDefault(); setDragging(false); handle(e.dataTransfer.files[0]) }}
-      style={{
-        border: `2px dashed ${file ? '#16A34A' : dragging ? PURPLE : '#C4B5D9'}`,
-        borderRadius: 10, padding: '20px 16px', textAlign: 'center',
-        cursor: file ? 'default' : 'pointer',
-        background: file ? '#F0FDF4' : dragging ? PURPLE_LIGHT : '#FAFAFA',
-        transition: 'all 0.15s', flex: 1,
-      }}
-    >
-      <div style={{ fontSize: 28, marginBottom: 6 }}>{file ? '✅' : icon}</div>
-      <div style={{ fontWeight: 600, fontSize: 13, color: file ? '#16A34A' : PURPLE, marginBottom: 3 }}>
-        {file ? file.name : label}
-      </div>
-      <div style={{ fontSize: 11, color: '#9CA3AF' }}>{file ? `${(file.size / 1024).toFixed(0)} KB` : hint}</div>
-      {file && (
-        <button
-          onClick={e => { e.stopPropagation(); onFile(null) }}
-          style={{ marginTop: 6, fontSize: 11, color: '#DC2626', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-        >✕ Remove</button>
-      )}
-      <input ref={ref} type="file" accept={accept} style={{ display: 'none' }}
-        onChange={e => handle(e.target.files[0])} />
-    </div>
-  )
-}
+  const SYSTEM_PROMPT = `You are an experienced structural engineer reviewing architectural drawings for ARX Engineers Ltd.
+Your task is to identify and categorise ALL structural elements visible in the drawing.
 
-// ─── Comment card ─────────────────────────────────────────────────────────────
-function CommentCard({ comment, index }) {
-  const [expanded, setExpanded] = useState(comment.severity === 'critical' || comment.severity === 'major')
-  const sev = SEVERITY[comment.severity] || SEVERITY.query
+Categorise each element into exactly one of these four groups:
+- existing: Elements clearly shown as existing structure (solid lines, labelled "existing", hatched as existing)
+- proposed: New elements to be designed or constructed (dashed lines, "new" labels, shown as additions, cloud markups)
+- remove: Elements to be demolished, removed or altered (shown with X marks, "remove" notation, or strike-through)
+- retain: Existing elements being kept but modified (labelled "retain", "keep", or shown with amendment marks)
 
-  return (
-    <div style={{
-      border: `1px solid ${sev.border}`, borderRadius: 8,
-      background: '#FFF', overflow: 'hidden', marginBottom: 8,
-    }}>
-      <button
-        onClick={() => setExpanded(e => !e)}
-        style={{
-          width: '100%', padding: '10px 14px', background: 'none', border: 'none',
-          cursor: 'pointer', display: 'flex', alignItems: 'flex-start', gap: 10, textAlign: 'left',
-        }}
-      >
-        <span style={{
-          flexShrink: 0, width: 22, height: 22, borderRadius: '50%',
-          background: sev.bg, border: `1px solid ${sev.border}`,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 11, fontWeight: 700, color: sev.color, marginTop: 1,
-        }}>{sev.icon}</span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 11, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: sev.bg, color: sev.color }}>
-              {sev.label}
-            </span>
-            {comment.member && (
-              <span style={{ fontSize: 11, fontWeight: 600, color: PURPLE, background: PURPLE_LIGHT, padding: '1px 7px', borderRadius: 20 }}>
-                {comment.member}
-              </span>
-            )}
-            {comment.clause && (
-              <span style={{ fontSize: 11, color: '#9CA3AF' }}>{comment.clause}</span>
-            )}
-          </div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: '#1A1A1A', marginTop: 4, lineHeight: 1.4 }}>
-            {comment.title}
-          </div>
-        </div>
-        <span style={{ fontSize: 11, color: '#9CA3AF', flexShrink: 0 }}>{expanded ? '▲' : '▼'}</span>
-      </button>
+For each element give a concise structural description using clear engineering language. Examples:
+- "Existing 225mm solid brick party wall — full height"
+- "Proposed steel beam over rear opening (size TBC)"
+- "Existing flat roof structure to be removed"
+- "Retain existing ground floor slab"
 
-      {expanded && (
-        <div style={{ padding: '0 14px 14px 46px', borderTop: `1px solid ${sev.border}`, paddingTop: 10 }}>
-          <div style={{ fontSize: 13, color: '#374151', lineHeight: 1.6, marginBottom: comment.recommendation ? 10 : 0 }}>
-            {comment.detail}
-          </div>
-          {comment.recommendation && (
-            <div style={{ background: '#F9FAFB', border: '1px solid #E5E7EB', borderRadius: 6, padding: '8px 12px' }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
-                Recommendation
-              </div>
-              <div style={{ fontSize: 13, color: '#1A1A1A', lineHeight: 1.5 }}>{comment.recommendation}</div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
+Flag any coordination issues, ambiguities, or items needing engineer attention in the notes array.
 
-// ─── Summary stats bar ────────────────────────────────────────────────────────
-function SummaryBar({ comments }) {
-  const counts = Object.keys(SEVERITY).reduce((a, k) => ({ ...a, [k]: 0 }), {})
-  comments.forEach(c => { if (counts[c.severity] !== undefined) counts[c.severity]++ })
+Respond ONLY with valid JSON — no preamble, no markdown fences:
+{"existing":[],"proposed":[],"remove":[],"retain":[],"notes":[]}`
 
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, marginBottom: 16 }}>
-      {Object.entries(SEVERITY).map(([k, v]) => (
-        <div key={k} style={{ background: v.bg, border: `1px solid ${v.border}`, borderRadius: 8, padding: '10px 12px', textAlign: 'center' }}>
-          <div style={{ fontSize: 22, fontWeight: 800, color: v.color, lineHeight: 1 }}>{counts[k]}</div>
-          <div style={{ fontSize: 11, color: v.color, fontWeight: 600, marginTop: 3 }}>{v.label}</div>
-        </div>
-      ))}
-    </div>
-  )
-}
+  try {
+    const messageContent = [
+      ...images.map(img => ({
+        type: 'image',
+        source: { type: 'base64', media_type: img.mediaType || 'image/jpeg', data: img.data }
+      })),
+      { type: 'text', text: `Analyse this drawing (${pageLabel || 'Page'}) and return the element schedule JSON.` }
+    ]
 
-// ─── Main CalcChecker component ───────────────────────────────────────────────
-export default function CalcChecker() {
-  const [calcFile, setCalcFile] = useState(null)    // .docx or .pdf
-  const [drawingFile, setDrawingFile] = useState(null) // .pdf
-  const [status, setStatus] = useState(null) // { type: 'loading'|'error'|'done', msg }
-  const [results, setResults] = useState(null)
-  const [activeFilter, setActiveFilter] = useState('all')
-  const [generatingPdf, setGeneratingPdf] = useState(false)
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: messageContent }],
+      }),
+    })
 
-  const canRun = calcFile || drawingFile
+    const data = await response.json()
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || 'Claude API error' })
 
-  const run = async () => {
-    setStatus({ type: 'loading', msg: 'Preparing files…' })
-    setResults(null)
-
+    const rawText = data.content?.[0]?.text || ''
+    let parsed
     try {
-      // ── Prepare calc file ──────────────────────────────────────────────────
-      let calcPayload = null
-      if (calcFile) {
-        const isPDF = calcFile.name.endsWith('.pdf')
-        const isDocx = calcFile.name.endsWith('.docx') || calcFile.name.endsWith('.doc')
-        if (isPDF) {
-          setStatus({ type: 'loading', msg: 'Rasterising calculation PDF…' })
-          const pages = await rasterisePDF(calcFile, msg => setStatus({ type: 'loading', msg }))
-          calcPayload = { type: 'images', pages: pages.map(p => ({ data: p.dataUrl.split(',')[1], pageNum: p.pageNum })), filename: calcFile.name }
-        } else if (isDocx) {
-          const b64 = await readFileAsBase64(calcFile)
-          calcPayload = { type: 'docx', data: b64, filename: calcFile.name }
-        }
-      }
-
-      // ── Prepare drawing file ───────────────────────────────────────────────
-      let drawingPayload = null
-      if (drawingFile) {
-        // Extract text layer first — reliably gets member schedules regardless of image scale
-        setStatus({ type: 'loading', msg: 'Extracting drawing text (member schedules, notes)…' })
-        const drawingText = await extractPdfText(drawingFile)
-        // Then rasterise for visual review
-        setStatus({ type: 'loading', msg: 'Rasterising drawing PDF…' })
-        const pages = await rasterisePDF(drawingFile, msg => setStatus({ type: 'loading', msg }))
-        drawingPayload = {
-          pages: pages.map(p => ({ data: p.dataUrl.split(',')[1], pageNum: p.pageNum })),
-          filename: drawingFile.name,
-          textContent: drawingText,
-        }
-      }
-
-      setStatus({ type: 'loading', msg: 'Sending to review agent…' })
-
-      // POST: kick off the review, get a jobId back immediately
-      const res = await fetch('/api/check-package', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ calc: calcPayload, drawing: drawingPayload }),
-      })
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: `Server error ${res.status}` }))
-        throw new Error(err.error || `Server error ${res.status}`)
-      }
-
-      const { jobId, error: startErr } = await res.json()
-      if (startErr) throw new Error(startErr)
-      if (!jobId) throw new Error('No jobId returned from server')
-
-      // Poll status endpoint until complete/error/timeout
-      const startedAt = Date.now()
-      const MAX_WAIT_MS = 10 * 60 * 1000 // 10 minutes hard cap
-      const POLL_MS = 3000
-
-      let data = null
-      while (true) {
-        if (Date.now() - startedAt > MAX_WAIT_MS) {
-          throw new Error('Review timed out after 10 minutes')
-        }
-        await new Promise(r => setTimeout(r, POLL_MS))
-        let statusRes
-        try {
-          statusRes = await fetch(`/api/check-package/status/${jobId}`)
-        } catch (netErr) {
-          // Transient network error — keep polling; container may be restarting
-          console.warn('[poll] network error, retrying:', netErr?.message)
-          continue
-        }
-        if (!statusRes.ok) {
-          if (statusRes.status === 404) throw new Error('Job not found — server may have restarted')
-          continue
-        }
-        const jobState = await statusRes.json()
-        if (jobState.progress) {
-          setStatus({ type: 'loading', msg: jobState.progress })
-        }
-        if (jobState.status === 'complete') {
-          data = jobState.result
-          break
-        }
-        if (jobState.status === 'error') {
-          throw new Error(jobState.error || 'Review failed on server')
-        }
-        // still pending — loop
-      }
-
-      setResults(data)
-      setStatus({ type: 'done', msg: `Review complete — ${data.comments?.length || 0} item${data.comments?.length !== 1 ? 's' : ''} raised` })
-
-    } catch (err) {
-      setStatus({ type: 'error', msg: err.message })
+      const clean = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+      const jsonStart = clean.indexOf('{')
+      const jsonEnd = clean.lastIndexOf('}')
+      parsed = JSON.parse(clean.slice(jsonStart, jsonEnd + 1))
+    } catch {
+      parsed = { existing: [], proposed: [], remove: [], retain: [], notes: [`Parse error — raw: ${rawText.slice(0, 200)}`] }
     }
+    res.json(parsed)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
   }
+})
+// ─── /api/check-package ──────────────────────────────────────────────────────
+// Add these endpoints to server.js alongside existing /api/claude and /api/analyse-drawings
 
-  const downloadReport = async () => {
-    if (!results) return
-    setGeneratingPdf(true)
-    try {
-      const res = await fetch('/api/check-package/report', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ results, calcFilename: calcFile?.name, drawingFilename: drawingFile?.name }),
-      })
-      if (!res.ok) throw new Error('Failed to generate report')
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      const ref = results.projectRef || 'ARX'
-      a.download = `${ref} - Structural Review Note.pdf`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
-    } catch (err) {
-      setStatus({ type: 'error', msg: 'Report generation failed: ' + err.message })
-    }
-    setGeneratingPdf(false)
+// In-memory job store — POST returns jobId immediately, client polls for status.
+// Avoids Railway edge / browser timeouts on long-running (2–3 min) reviews.
+const reviewJobs = new Map()
+
+// Cleanup old jobs every 10 min — remove anything older than 1 hour
+setInterval(() => {
+  const cutoff = Date.now() - 60 * 60 * 1000
+  for (const [id, job] of reviewJobs) {
+    if (job.createdAt < cutoff) reviewJobs.delete(id)
   }
+}, 10 * 60 * 1000)
 
-  const filtered = results?.comments?.filter(c =>
-    activeFilter === 'all' || c.severity === activeFilter
-  ) || []
+// GET status of an in-flight or completed review job
+app.get('/api/check-package/status/:jobId', (req, res) => {
+  const job = reviewJobs.get(req.params.jobId)
+  if (!job) return res.status(404).json({ status: 'not_found' })
+  res.json({
+    status: job.status,       // 'pending' | 'complete' | 'error'
+    progress: job.progress,   // human-readable progress message
+    result: job.result,       // set when status='complete'
+    error: job.error,         // set when status='error'
+  })
+})
 
-  const chipStyle = (active) => ({
-    padding: '5px 12px', borderRadius: 20, fontSize: 12, fontWeight: 600,
-    border: `1px solid ${active ? PURPLE : '#E5E7EB'}`,
-    background: active ? PURPLE_LIGHT : '#FFF',
-    color: active ? PURPLE : '#6B7280',
-    cursor: 'pointer',
+// ── Calc & drawing review agent (multi-pass) ──────────────────────────────────
+app.post('/api/check-package', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) return res.status(500).json({ error: 'API key not configured' })
+
+  const { calc, drawing } = req.body
+  if (!calc && !drawing) return res.status(400).json({ error: 'No files provided' })
+
+  // Create job and kick off work in background (fire-and-forget)
+  const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+  reviewJobs.set(jobId, {
+    status: 'pending',
+    progress: 'Starting review…',
+    createdAt: Date.now(),
+    result: null,
+    error: null,
   })
 
-  return (
-    <div style={{ padding: 32, fontFamily: 'Arial, sans-serif' }}>
-      {/* Header */}
-      <div style={{ marginBottom: 28 }}>
-        <h1 style={{ fontSize: 24, fontWeight: 800, color: PURPLE_DARK, marginBottom: 4 }}>Calculation & Drawing Checker</h1>
-        <p style={{ color: '#9CA3AF', fontSize: 14 }}>Upload your Tedds calc package (.docx or .pdf) and/or structural drawings (.pdf) for AI-assisted review</p>
-      </div>
+  // Debug: log what arrived
+  console.log(`check-package received [${jobId}] — calc: ${calc ? calc.type + ' ' + calc.filename : 'none'}, drawing: ${drawing ? drawing.filename + ' pages:' + drawing.pages?.length + ' textLen:' + (drawing.textContent?.length || 0) : 'none'}`)
 
-      {/* Upload row */}
-      <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
-        <UploadZone
-          label="Calculation Package"
-          accept=".docx,.doc,.pdf"
-          icon="📐"
-          hint=".docx or .pdf · Tedds for Word output"
-          file={calcFile}
-          onFile={setCalcFile}
-        />
-        <UploadZone
-          label="Structural Drawings"
-          accept=".pdf"
-          icon="📋"
-          hint=".pdf · GA, details, reinforcement"
-          file={drawingFile}
-          onFile={setDrawingFile}
-        />
-      </div>
+  // Respond IMMEDIATELY with jobId
+  res.json({ jobId })
 
-      {/* Info note */}
-      <div style={{ background: PURPLE_LIGHT, border: `1px solid #D8C5F0`, borderRadius: 8, padding: '10px 14px', fontSize: 12, color: PURPLE_DARK, marginBottom: 16 }}>
-        <strong>How it works:</strong> Upload one or both files. The agent reviews calculations for code compliance, unit consistency, missing checks, and load logic. 
-        Drawings are checked for member schedule completeness, connection detail coverage, and cross-reference with the calc package when both are provided.
-      </div>
+  // Now do the work in background
+  runReviewJob(jobId, apiKey, calc, drawing).catch(err => {
+    console.error(`[${jobId}] Unhandled error:`, err)
+    const job = reviewJobs.get(jobId)
+    if (job) {
+      job.status = 'error'
+      job.error = err.message || 'Unknown error'
+    }
+  })
+})
 
-      {/* Status */}
-      {status && (
-        <div style={{
-          padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 13,
-          display: 'flex', alignItems: 'center', gap: 8,
-          background: status.type === 'error' ? '#FEF2F2' : status.type === 'done' ? '#F0FDF4' : PURPLE_LIGHT,
-          color: status.type === 'error' ? '#DC2626' : status.type === 'done' ? '#16A34A' : PURPLE,
-          border: `1px solid ${status.type === 'error' ? '#FECACA' : status.type === 'done' ? '#BBF7D0' : '#D8C5F0'}`,
-        }}>
-          {status.type === 'loading' && <span style={{ animation: 'spin 1s linear infinite', display: 'inline-block' }}>⟳</span>}
-          {status.type === 'done' && '✓'}
-          {status.type === 'error' && '✕'}
-          {status.msg}
-        </div>
-      )}
-
-      {/* Run button */}
-      <button
-        onClick={run}
-        disabled={!canRun || status?.type === 'loading'}
-        style={{
-          width: '100%', padding: '12px 0', marginBottom: 24,
-          background: !canRun || status?.type === 'loading' ? '#C4B5D9' : PURPLE,
-          color: '#FFF', border: 'none', borderRadius: 8,
-          fontWeight: 700, fontSize: 15, cursor: !canRun || status?.type === 'loading' ? 'not-allowed' : 'pointer',
-          transition: 'background 0.15s',
-        }}
-      >
-        {status?.type === 'loading' ? 'Reviewing…' : '🔍 Run Full Package Review'}
-      </button>
-
-      {/* Results */}
-      {results && (
-        <div>
-          {/* Project info */}
-          {(results.projectRef || results.projectTitle) && (
-            <div style={{ background: '#F9FAFB', border: '1px solid #E5E7EB', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 13 }}>
-              <span style={{ fontWeight: 700, color: PURPLE }}>{results.projectRef}</span>
-              {results.projectRef && results.projectTitle && ' · '}
-              <span style={{ color: '#374151' }}>{results.projectTitle}</span>
-              {results.calcBy && <span style={{ color: '#9CA3AF', marginLeft: 12 }}>Calc by: {results.calcBy}</span>}
-            </div>
-          )}
-
-          {/* Summary */}
-          {results.summary && (
-            <div style={{ background: '#FFF', border: '1px solid #E5E7EB', borderRadius: 8, padding: '14px 16px', marginBottom: 16, fontSize: 13, lineHeight: 1.6, color: '#374151' }}>
-              <div style={{ fontWeight: 700, fontSize: 12, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>Review Summary</div>
-              {results.summary}
-            </div>
-          )}
-
-          {/* Stats */}
-          <SummaryBar comments={results.comments || []} />
-
-          {/* Filter chips */}
-          <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
-            <button style={chipStyle(activeFilter === 'all')} onClick={() => setActiveFilter('all')}>
-              All ({results.comments?.length || 0})
-            </button>
-            {Object.entries(SEVERITY).filter(([k]) => k !== 'pass').map(([k, v]) => {
-              const count = results.comments?.filter(c => c.severity === k).length || 0
-              if (!count) return null
-              return (
-                <button key={k} style={chipStyle(activeFilter === k)} onClick={() => setActiveFilter(k)}>
-                  {v.label} ({count})
-                </button>
-              )
-            })}
-          </div>
-
-          {/* Comment list */}
-          <div>
-            {filtered.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: 32, color: '#9CA3AF', fontSize: 13 }}>
-                No items in this category
-              </div>
-            ) : (
-              filtered.map((c, i) => <CommentCard key={i} comment={c} index={i} />)
-            )}
-          </div>
-
-          {/* Download */}
-          <button
-            onClick={downloadReport}
-            disabled={generatingPdf}
-            style={{
-              marginTop: 16, width: '100%', padding: '11px 0',
-              background: generatingPdf ? '#E5E7EB' : '#1A1A1A',
-              color: generatingPdf ? '#9CA3AF' : '#FFF',
-              border: 'none', borderRadius: 8, fontWeight: 600, fontSize: 14,
-              cursor: generatingPdf ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {generatingPdf ? '⏳ Generating PDF…' : '⬇ Download Review Note (.pdf)'}
-          </button>
-        </div>
-      )}
-
-      <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
-    </div>
-  )
+// Helper to update job progress from anywhere inside runReviewJob
+function updateJobProgress(jobId, msg) {
+  const job = reviewJobs.get(jobId)
+  if (job && job.status === 'pending') {
+    job.progress = msg
+    console.log(`[${jobId}] ${msg}`)
+  }
 }
+
+// The actual review work — extracted so it can run in the background
+async function runReviewJob(jobId, apiKey, calc, drawing) {
+
+  // ── ARX standard values baked in for calibration ──────────────────────────
+  const ARX_STANDARDS = `
+ARX ENGINEERS — STANDARD DESIGN VALUES (use these to calibrate your review):
+
+DEFLECTION LIMITS (from ARX cover page template):
+- Timber final deflection (1.6Gk + Qk): Span/250, max 14mm
+- Timber instantaneous deflection (Gk + Qk): Span/360, max 14mm
+- Steel imposed load over brittle finishes: Span/500, max 10mm
+- Steel imposed load non-brittle: Span/360, max 15mm
+- Steel total (DL + IL): Span/360, max 25mm
+- Wind horizontal (brittle): Height/500
+- Wind horizontal (non-brittle): Height/300
+- Steel vertical fundamental frequency: minimum 4.5 Hz
+
+STANDARD LOAD VALUES:
+- Timber floor (with partitions): DL = 0.50 kN/m², IL = 1.50 kN/m², partition = 0.50 kN/m²
+- Flat roof (timber, non-accessible): DL = 0.60 kN/m², IL = 0.60 kN/m²
+- Cold pitched roof (concrete tiles, storage): DL = 1.45 kN/m², IL = 0.75 kN/m²
+- Cavity wall (existing): DL = 4.50 kN/m²
+- Cavity wall (new): DL = 4.70 kN/m²
+
+MATERIAL GRADES:
+- Steel: S355
+- Structural timber joists/beams: C24
+- Structural timber studs: C16
+- Reinforced concrete: C28/35 (cover page) or C32/35 (rebar spec)
+- Mass concrete foundations: Gen 3
+- RC ground bearing slab: Gen 3
+
+LOAD COMBINATIONS (EN 1990):
+- ULS strength: 1.35Gk + 1.5Qk (+ 0.75×1.5Wk when wind included)
+- SLS service: 1.0Gk + 1.0Qk (+ 0.5Wk when wind included)
+- ULS wind dominant: 1.35Gk + 1.05Qk + 1.5Wk
+
+MINIMUM BEARINGS:
+- Steel beam on masonry: 150mm minimum (full leaf width if no bearing detail shown)
+- Timber joist on masonry: 100mm minimum
+- Timber joist on steel: 75mm minimum`
+
+  const MEMBER_REVIEW_SYSTEM = `You are a senior structural engineer conducting a peer review for ARX Engineers Ltd. Director: Effiom Esua BEng MSc. You are reviewing individual member calculations from a Tedds for Word calculation package.
+
+${ARX_STANDARDS}
+
+For each member calculation provided, check:
+1. LOADS: Are load inputs consistent with the ARX standard values above? Flag any that differ significantly without explanation.
+2. LOAD COMBINATIONS: Are EN 1990 combination factors correct?
+3. CHECKS COMPLETENESS: Has bending AND shear AND deflection AND bearing all been checked? Flag any missing.
+4. DEFLECTION LIMITS: Do the limits used match ARX standards above exactly?
+5. PASS/FAIL: Are all checks passing? If a check is close to the limit (utilisation > 0.85) flag as a query.
+6. SERVICE CLASS: Is the correct timber service class used?
+7. INSPECTION ITEMS: If a member is "designed by inspection", is this reasonable for the span and load?
+8. MATERIAL GRADE: Is the correct grade used (S355 steel, C24 timber)?
+9. BEARING LENGTHS: Are bearing lengths stated and do they meet minimums?
+10. UNITS: Are there any apparent unit errors?
+
+Return ONLY valid JSON, no markdown fences:
+{"comments": [{"severity": "critical|major|minor|query|pass", "member": "member ID", "clause": "code clause or null", "title": "concise title", "detail": "specific detail with values", "recommendation": "action or null"}]}`
+
+  const DRAWING_REVIEW_SYSTEM = `You are a senior structural engineer reviewing structural drawings for ARX Engineers Ltd.
+
+${ARX_STANDARDS}
+
+Review the drawings for:
+1. MEMBER SCHEDULE: Is every member shown on the plan (B-1, L-5, C-3 etc.) in the member schedule with a full specification?
+2. CONNECTIONS: Is every connection reference (CD-x) on the plan covered by a schedule entry or detail?
+3. PADSTONES: Is a padstone specified at every point load bearing? Are sizes appropriate?
+4. BEARING DIMENSIONS: Are steel beam bearings shown and do they meet 150mm minimum?
+5. TIMBER: Are joist directions clear? Are trimmers and doubled joists shown at all openings?
+6. NOTES CONSISTENCY: Do material grades in general notes match ARX standards?
+7. TITLE BLOCK: Is revision, scale, drawing reference complete on every sheet?
+8. WALL DIMENSIONS: Are assumed cavity wall widths consistent throughout?
+
+IMPORTANT: For every member referenced on the drawings (B-1, L-5, C-3, FJ-1 etc.), use that exact reference ID in the "member" field of your comments. This allows exact cross-referencing with the calculation package.
+When you see a member schedule entry like "B-1: 178x102x19 UB STEEL BEAM", create a pass comment with member="B-1" and detail stating the scheduled size. This builds the drawing member list for cross-referencing.
+
+Return ONLY valid JSON, no markdown fences:
+{"comments": [{"severity": "critical|major|minor|query|pass", "member": "exact member ID e.g. B-1 or null", "clause": "code clause or null", "title": "concise title", "detail": "specific detail including scheduled size where relevant", "recommendation": "action or null"}]}`
+
+  const SYNTHESIS_SYSTEM = `You are a senior structural engineer writing a final review summary for ARX Engineers Ltd.
+Extract the project reference number (e.g. ARX26059), project title, and calc author from the cover page text.
+Write a 3-4 sentence overall assessment of the package quality, main issues found, and overall recommendation.
+Return ONLY valid JSON, no markdown fences:
+{"projectRef": "string or null", "projectTitle": "string or null", "calcBy": "string or null", "summary": "3-4 sentence summary"}`
+
+  // ── Helper: single Claude call ─────────────────────────────────────────────
+  async function claudeCall(system, content, maxTokens = 4000) {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: maxTokens,
+        system,
+        messages: [{ role: 'user', content }],
+      }),
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error?.message || 'Claude API error')
+    return data.content?.[0]?.text || ''
+  }
+
+  // ── Helper: parse JSON safely ──────────────────────────────────────────────
+  function safeParseJSON(text, fallback) {
+    try {
+      const clean = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+      const start = clean.indexOf('{')
+      const end = clean.lastIndexOf('}')
+      if (start === -1 || end === -1) return fallback
+      return JSON.parse(clean.slice(start, end + 1))
+    } catch {
+      return fallback
+    }
+  }
+
+  // ── Helper: extract sections from mammoth HTML using heading tags ────────────
+  // Two-strategy approach for Tedds calc packages:
+  //   1. mammoth style map — maps Tedds custom paragraph styles to h1/h2/h3
+  //   2. Regex fallback — splits on well-known Tedds section header text patterns
+  // We ALWAYS run the regex splitter and prefer it if it yields more sections.
+  async function splitDocxByHeadings(base64Data) {
+    const buffer = Buffer.from(base64Data, 'base64')
+
+    // Strategy 1: mammoth with expanded style map covering common Tedds styles
+    const styleMap = [
+      // Built-in Word styles
+      "p[style-name='Heading 1'] => h1:fresh",
+      "p[style-name='Heading 2'] => h2:fresh",
+      "p[style-name='Heading 3'] => h3:fresh",
+      "p[style-name='heading 1'] => h1:fresh",
+      "p[style-name='heading 2'] => h2:fresh",
+      "p[style-name='heading 3'] => h3:fresh",
+      // Common Tedds style names (best guess — the actual names Tedds uses)
+      "p[style-name='Tedds Heading'] => h2:fresh",
+      "p[style-name='TeddsHeading'] => h2:fresh",
+      "p[style-name='Tedds Heading 1'] => h1:fresh",
+      "p[style-name='Tedds Heading 2'] => h2:fresh",
+      "p[style-name='Tedds Heading 3'] => h3:fresh",
+      "p[style-name='TeddsHeading1'] => h1:fresh",
+      "p[style-name='TeddsHeading2'] => h2:fresh",
+      "p[style-name='TeddsHeading3'] => h3:fresh",
+      "p[style-name='Tedds Section Heading'] => h2:fresh",
+      "p[style-name='Section Heading'] => h2:fresh",
+      "p[style-name='SectionTitle'] => h2:fresh",
+    ]
+
+    const htmlResult = await mammoth.convertToHtml({ buffer }, { styleMap })
+    const html = htmlResult.value
+    const textResult = await mammoth.extractRawText({ buffer })
+    const fullText = textResult.value
+
+    // Log which unmapped styles mammoth saw — helps us discover the actual Tedds style name
+    if (htmlResult.messages?.length) {
+      const styleWarnings = htmlResult.messages
+        .filter(m => m.type === 'warning' && /style/i.test(m.message))
+        .slice(0, 10)
+        .map(m => m.message)
+      if (styleWarnings.length) {
+        console.log('Unmapped styles (first 10):', styleWarnings)
+      }
+    }
+
+    // Extract headings from HTML
+    const headingPattern = /<h[1-4][^>]*>(.*?)<\/h[1-4]>/gi
+    const htmlHeadings = []
+    let match
+    while ((match = headingPattern.exec(html)) !== null) {
+      const headingText = match[1].replace(/<[^>]+>/g, '').trim()
+      if (headingText) htmlHeadings.push(headingText)
+    }
+    console.log(`Style-map strategy found ${htmlHeadings.length} headings`)
+
+    // Strategy 2: regex on raw text — key off known Tedds section header patterns
+    // These match the actual line contents Tedds produces, regardless of paragraph style
+    const TEDDS_HEADING_RE = new RegExp([
+      // Member type + ref: BEAM B-1, LINTEL L-2, COLUMN C-1, POST P-1, RAFTER R-1
+      '^(BEAM|LINTEL|COLUMN|POST|RAFTER|JOIST|WALL|SLAB|PLATE|PIER|STUD|TIE)\\s+[A-Z]+-?\\d+.*$',
+      // Frame sections: FRAME 1: BEAM B-3 & COLUMN C-1, FRAME 2: LINTEL TORSION
+      '^FRAME\\s+\\d+\\s*[:.].*$',
+      // Bearings: B-1 BEARINGS, L-1 BEARINGS
+      '^[A-Z]+-?\\d+\\s+BEARINGS.*$',
+      // Named engineering sections (from typical ARX Tedds packages)
+      '^(SKETCH FLOOR PLANS|DESIGN LOADINGS|LOADING SUMMARY|MASONRY SIDE PANEL|MASONRY WALL PANEL)$',
+      '^(PAD FOUNDATION|TRENCH FILL FOUNDATION|STRIP FOUNDATION)$',
+      '^(STEEL MASONRY SUPPORT|STEEL COLUMN|STEEL BEAM|STEEL CONNECTION)$',
+      '^(MOMENT CONNECTION|BEAM SPLICE|BASE PLATE|WELDED CONNECTION|BOLTED CONNECTION)$',
+      '^(LATERAL RESTRAINT|BUCKLING CHECK|SHEAR CHECK|DEFLECTION CHECK)$',
+      // Cover-page style keys — CLIENT : TBC, DESCRIPTION : ..., BRIEF : ...
+      '^(CLIENT|DESCRIPTION|BRIEF|PROJECT|JOB|SECTION)\\s*[:\\-].*$',
+    ].join('|'), 'im')
+
+    // Global variant for splitting
+    const TEDDS_HEADING_RE_GLOBAL = new RegExp(TEDDS_HEADING_RE.source, 'gm')
+
+    const regexHeadings = []
+    let m
+    while ((m = TEDDS_HEADING_RE_GLOBAL.exec(fullText)) !== null) {
+      regexHeadings.push({ text: m[0].trim(), index: m.index })
+    }
+    console.log(`Regex strategy found ${regexHeadings.length} headings — first 20:`,
+      regexHeadings.slice(0, 20).map(h => h.text))
+
+    // Choose the strategy that found more sections. Prefer regex if tied — it's more reliable.
+    let sections = []
+
+    if (regexHeadings.length >= Math.max(htmlHeadings.length, 3)) {
+      // Regex wins — split fullText at each heading position
+      console.log(`Using REGEX strategy (${regexHeadings.length} headings)`)
+      for (let i = 0; i < regexHeadings.length; i++) {
+        const start = regexHeadings[i].index
+        const end = i + 1 < regexHeadings.length ? regexHeadings[i + 1].index : fullText.length
+        const section = fullText.slice(start, end).trim()
+        if (section.length > 50) sections.push(section)
+      }
+    } else if (htmlHeadings.length >= 3) {
+      // Style-map wins — split by locating each heading text in the raw text
+      console.log(`Using STYLE-MAP strategy (${htmlHeadings.length} headings)`)
+      let remaining = fullText
+      for (let i = 0; i < htmlHeadings.length; i++) {
+        const heading = htmlHeadings[i]
+        const nextHeading = htmlHeadings[i + 1]
+        const headingIdx = remaining.search(new RegExp(heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))
+        if (headingIdx === -1) continue
+        let sectionEnd = remaining.length
+        if (nextHeading) {
+          const nextIdx = remaining.search(new RegExp(nextHeading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'))
+          if (nextIdx > headingIdx) sectionEnd = nextIdx
+        }
+        const section = remaining.slice(headingIdx, sectionEnd).trim()
+        if (section.length > 50) sections.push(section)
+        remaining = remaining.slice(headingIdx + 1)
+      }
+    } else {
+      // Neither found much — fall back to old text-pattern splitter
+      console.log('Both strategies weak — falling back to text-pattern splitter')
+      return splitByTextPattern(fullText)
+    }
+
+    // Group small consecutive sections into ~12k-char batches (Claude context budget)
+    const grouped = []
+    let current = ''
+    for (const section of sections) {
+      if (current.length + section.length > 12000 && current.length > 0) {
+        grouped.push(current.trim())
+        current = section
+      } else {
+        current += (current ? '\n\n' : '') + section
+      }
+    }
+    if (current.trim()) grouped.push(current.trim())
+
+    console.log(`Split into ${sections.length} sections, grouped into ${grouped.length} batches`)
+    return grouped.length > 0 ? grouped : [fullText.slice(0, 15000)]
+  }
+
+  // ── Fallback: text pattern splitter (for non-headed documents) ─────────────
+  function splitByTextPattern(text) {
+    // Match ALL-CAPS lines of 3-60 chars that look like section headings
+    const parts = text.split(/\n(?=[A-Z][A-Z\s\-:/()0-9]{2,59}\n)/)
+    const chunks = []
+    let current = ''
+    for (const part of parts) {
+      if (!part) continue
+      if (current.length + part.length > 12000 && current.length > 0) {
+        chunks.push(current.trim())
+        current = part
+      } else {
+        current += '\n' + part
+      }
+    }
+    if (current.trim()) chunks.push(current.trim())
+    return chunks.length > 0 ? chunks : [text.slice(0, 15000)]
+  }
+
+  try {
+    const allComments = []
+    let coverText = ''
+    let calcHeadingChunks = null
+
+    // ── PASS 1: Calculation review (chunked by member) ──────────────────────
+    if (calc) {
+      let calcText = ''
+
+      if (calc.type === 'docx') {
+        const buffer = Buffer.from(calc.data, 'base64')
+        const extracted = await mammoth.extractRawText({ buffer })
+        calcText = extracted.value
+        console.log(`Calc text extracted: ${calcText.length} chars, ~${Math.round(calcText.length/500)} pages`)
+        updateJobProgress(jobId, `Calc extracted (${Math.round(calcText.length/500)} pages) — analysing…`)
+        // Override with heading-aware split
+        calcText = '__USE_HEADING_SPLIT__'
+        calcHeadingChunks = await splitDocxByHeadings(calc.data)
+        console.log(`Heading-split into ${calcHeadingChunks.length} sections`)
+      } else if (calc.type === 'images') {
+        // For PDF calcs, still use image approach but process all pages in groups
+        const pageGroups = []
+        for (let i = 0; i < calc.pages.length; i += 8) {
+          pageGroups.push(calc.pages.slice(i, i + 8))
+        }
+        for (let g = 0; g < pageGroups.length; g++) {
+          const group = pageGroups[g]
+          const content = [
+            { type: 'text', text: `Calculation pages ${g*8+1}–${g*8+group.length} of ${calc.pages.length} from ${calc.filename}:` },
+            ...group.map(p => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: p.data } })),
+            { type: 'text', text: 'Review these calculation pages. Return JSON with comments array.' }
+          ]
+          const raw = await claudeCall(MEMBER_REVIEW_SYSTEM, content, 3000)
+          const result = safeParseJSON(raw, { comments: [] })
+          allComments.push(...(result.comments || []))
+        }
+      }
+
+      // For docx: use heading-aware chunks
+      const chunks = calcHeadingChunks || (calcText ? splitByTextPattern(calcText) : [])
+      if (chunks.length > 0) {
+        coverText = chunks[0].slice(0, 3000) // cover page is first chunk
+        console.log(`Reviewing ${chunks.length} sections`)
+        updateJobProgress(jobId, `Reviewing ${chunks.length} calc sections…`)
+
+        const batchSize = 5
+        for (let i = 0; i < chunks.length; i += batchSize) {
+          const batch = chunks.slice(i, i + batchSize)
+          const batchResults = await Promise.all(batch.map(async (chunk, idx) => {
+            const content = `CALCULATION SECTION ${i + idx + 1} of ${chunks.length} from ${calc.filename}:\n\n${chunk}\n\nReview this section. Return JSON with comments array.`
+            const raw = await claudeCall(MEMBER_REVIEW_SYSTEM, content, 3000)
+            return safeParseJSON(raw, { comments: [] })
+          }))
+          for (const result of batchResults) {
+            allComments.push(...(result.comments || []))
+          }
+        }
+      }
+    }
+
+    // ── PASS 2: Drawing review ───────────────────────────────────────────────
+    if (drawing) {
+      // Step 2a: If we have extracted text, use it for member schedule extraction first
+      if (drawing.textContent && drawing.textContent.trim()) {
+        // Diagnostic: dump first slice of drawing text so we can see what actually arrived
+        console.log('── DRAWING TEXT PREVIEW (first 2500 chars) ──')
+        console.log(drawing.textContent.slice(0, 2500))
+        console.log('── END PREVIEW ──')
+
+        const SCHEDULE_EXTRACT_SYSTEM = `You are reviewing structural drawing text extracted from an ARX Engineers Ltd drawing package.
+
+The text was extracted from a Bluebeam-marked PDF via PDF.js annotation extraction, so it may be FRAGMENTED — individual text boxes come out separately and NOT in reading order. You may see something like:
+
+"B-1"
+"2No. 47x175mm C24 TIMBERS BOLTED TOGETHER"
+"[Annotations]"
+"Text — B-2"
+"Text — 152x152x23 UC"
+
+Reconstruct the member schedule by pairing member references with their nearby section-size descriptions. Look for ANY token that matches these patterns:
+- Beams: B-1, B-2, B-3 ... or B1, B2 ...
+- Rafters: R-1, R-2 ...
+- Joists: FJ-1, FJ-2, CJ-1, HR-1 ...
+- Lintels: L-1, L-2 ...
+- Columns/Posts: C-1, C-2, P-1, P-2 ...
+- Padstones: PS-1, PS-2 ...
+- Connection details: CD-1, CD-2 ...
+
+For each, find the associated section size or spec that appears NEAR it in the text (Bluebeam text boxes for a schedule row often sit adjacent to each other in extraction order even if the reading order is jumbled).
+
+Be GENEROUS — if a reference like "B-1" appears at all in the drawing text, list it with whatever spec you can associate with it (or empty string if nothing found nearby).
+
+Return ONLY valid JSON, no markdown, no code fences:
+{"members": [{"ref": "B-1", "scheduledSize": "2No. 47x175mm C24", "type": "timber beam"}], "connections": [{"ref": "CD-1", "description": "..."}], "padstones": [{"ref": "PS-1", "description": "..."}]}`
+
+        const scheduleRaw = await claudeCall(SCHEDULE_EXTRACT_SYSTEM,
+          `Extract member schedule from this drawing text (may be fragmented / out of reading order):\n\n${drawing.textContent.slice(0, 50000)}`, 3000)
+
+        console.log('── SCHEDULE EXTRACT RAW RESPONSE (first 1500 chars) ──')
+        console.log(scheduleRaw?.slice(0, 1500))
+        console.log('── END RAW ──')
+
+        const scheduleData = safeParseJSON(scheduleRaw, { members: [], connections: [], padstones: [] })
+
+        console.log(`Drawing schedule extracted: ${scheduleData.members?.length || 0} members, ${scheduleData.connections?.length || 0} connections, ${scheduleData.padstones?.length || 0} padstones`)
+        updateJobProgress(jobId, `Drawing schedule: ${scheduleData.members?.length || 0} members found — cross-referencing…`)
+        if (scheduleData.members?.length) {
+          console.log('Members found:', scheduleData.members.map(m => m.ref).join(', '))
+        }
+
+        // Add pass comments for each drawing schedule member (for cross-referencing)
+        for (const m of (scheduleData.members || [])) {
+          allComments.push({
+            severity: 'pass',
+            member: m.ref,
+            clause: null,
+            title: `Drawing schedule entry confirmed: ${m.ref}`,
+            detail: `Member ${m.ref} found in drawing member schedule: ${m.scheduledSize || '(size not identifiable in extracted text)'}`,
+            recommendation: null,
+            _drawingSize: m.scheduledSize, // internal use for cross-ref
+          })
+        }
+      }
+
+      // Step 2b: Visual review of drawing images
+      const pageGroups = []
+      for (let i = 0; i < drawing.pages.length; i += 6) {
+        pageGroups.push(drawing.pages.slice(i, i + 6))
+      }
+
+      const drawingResults = await Promise.all(pageGroups.map(async (group, g) => {
+        const content = [
+          { type: 'text', text: `Drawing sheets ${g*6+1}–${g*6+group.length} of ${drawing.pages.length} from ${drawing.filename}:` },
+          ...group.map(p => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: p.data } })),
+          { type: 'text', text: 'Review these drawing sheets for coordination issues, missing bearings, padstone positions, connection coverage, and title block completeness. Return JSON with comments array.' }
+        ]
+        const raw = await claudeCall(DRAWING_REVIEW_SYSTEM, content, 3000)
+        return safeParseJSON(raw, { comments: [] })
+      }))
+
+      for (const result of drawingResults) {
+        allComments.push(...(result.comments || []))
+      }
+    }
+
+    // ── PASS 3: Extract explicit member references from calcs ─────────────────
+    const EXTRACT_MEMBERS_SYSTEM = `You are reviewing a structural calculation package for ARX Engineers Ltd.
+Extract every explicit member reference ID from the calculations.
+Member references follow patterns like: B-1, B-2, C-1, L-1, FJ-1, RJ-1, TR-1, HR-1, CJ-1, P-1, PS-1, CD-1, R-1 etc.
+Also extract the designed/adopted section size from the conclusion of each member calc.
+Look for conclusion lines like "USE 178x102x19 UB", "ADOPT 47x200 C24 @ 400 c/c", "USE 152x152x37 UC".
+Also extract frame groupings e.g. "Frame 1: Beam B-8 & Column C-1" and list each member separately.
+Return ONLY valid JSON, no markdown:
+{"members": [{"ref": "B-1", "type": "steel beam", "designedSize": "178x102x19 UB", "calcSection": "brief what was checked"}]}`
+
+    let calcMembers = []
+    if (calc && calcHeadingChunks && calcHeadingChunks.length > 0) {
+      const allCalcText = calcHeadingChunks.join('\n\n---\n\n').slice(0, 60000)
+      const extractRaw = await claudeCall(EXTRACT_MEMBERS_SYSTEM,
+        `Extract all member references from this calculation package:\n\n${allCalcText}`, 2000)
+      const extracted = safeParseJSON(extractRaw, { members: [] })
+      calcMembers = extracted.members || []
+      console.log(`Extracted ${calcMembers.length} calc members:`, calcMembers.map(m => m.ref))
+    }
+
+    // ── PASS 4: Exact cross-reference calcs vs drawings ───────────────────────
+    const crossRefComments = []
+    if (calc && drawing && calcMembers.length > 0) {
+      const XREF_SYSTEM = `You are cross-referencing structural calculations against structural drawings for ARX Engineers Ltd.
+
+You will be given:
+1. A list of member references extracted from the calculations with their designed section sizes
+2. Member references identified from the drawing review
+
+Rules:
+- Match EXACT reference IDs only: B-1 in calcs must match B-1 in drawings. Do not guess.
+- If a calc has B-1 designed as 178x102x19 UB but the drawing shows B-1 as 152x89x16 UB, that is a MAJOR discrepancy.
+- If a calc member (e.g. C-3) has no corresponding drawing entry, flag as MAJOR — calc member not shown on drawings.
+- If a drawing member has no corresponding calc, flag as MAJOR — undesigned member on drawings.
+- If a frame grouping in calcs says "Frame 1: B-8 & C-1", check B-8 and C-1 individually.
+- Do not invent matches. Only report what you can confirm or flag as missing.
+
+Return ONLY valid JSON, no markdown:
+{"comments": [{"severity": "critical|major|minor|query", "member": "exact ref e.g. B-1", "clause": null, "title": "concise title under 12 words", "detail": "state exact calc size and drawing size or note which is missing", "recommendation": "specific action"}]}`
+
+      const drawingMemberRefs = allComments
+        .filter(c => c.member && /^[A-Z]{1,3}-?\d/.test(c.member))
+        .map(c => c.member)
+        .filter((v, i, a) => a.indexOf(v) === i)
+
+      // Build drawing schedule map from pass comments that have _drawingSize
+      const drawingSchedule = {}
+      allComments
+        .filter(c => c._drawingSize && c.member)
+        .forEach(c => { drawingSchedule[c.member] = c._drawingSize })
+
+      const xrefContent = `Calc members with designed sizes:
+${calcMembers.map(m => `${m.ref}: ${m.designedSize || 'size not found in calc'} (${m.type || 'structural member'})`).join('\n')}
+
+Drawing member schedule (extracted directly from drawing text):
+${Object.keys(drawingSchedule).length > 0
+  ? Object.entries(drawingSchedule).map(([ref, size]) => `${ref}: ${size}`).join('\n')
+  : `No schedule extracted. Member refs seen in drawing review: ${drawingMemberRefs.join(', ') || 'none'}`}
+
+Cross-reference rules:
+- Match EXACT reference IDs: B-1 in calcs must match B-1 in drawing schedule
+- Compare section sizes exactly: flag any discrepancy between calc designed size and drawing scheduled size
+- Flag any calc member with no drawing schedule entry as MAJOR
+- Flag any drawing schedule member with no corresponding calc as MAJOR
+- Do not invent matches or guess`
+
+      const xrefRaw = await claudeCall(XREF_SYSTEM, xrefContent, 3000)
+      const xref = safeParseJSON(xrefRaw, { comments: [] })
+      crossRefComments.push(...(xref.comments || []))
+      console.log(`Cross-ref raised ${crossRefComments.length} issues`)
+      updateJobProgress(jobId, `Cross-referencing complete — synthesising final report…`)
+    }
+
+    // ── PASS 5: Synthesis ──────────────────────────────────────────────────────
+    const allFinal = [...allComments, ...crossRefComments]
+    const synthContent = `Cover page / project info:
+${coverText || 'Not available'}
+
+Total comments: ${allFinal.length} — Critical: ${allFinal.filter(c=>c.severity==='critical').length}, Major: ${allFinal.filter(c=>c.severity==='major').length}, Minor: ${allFinal.filter(c=>c.severity==='minor').length}, Query: ${allFinal.filter(c=>c.severity==='query').length}, Pass: ${allFinal.filter(c=>c.severity==='pass').length}
+Calc members found: ${calcMembers.map(m=>m.ref).join(', ') || 'none extracted'}
+Sample: ${allFinal.slice(0,6).map(c=>`[${c.severity}] ${c.member||''} ${c.title}`).join('; ')}
+
+Extract project ref, title, calc author. Write 3-4 sentence summary. Return JSON:
+{"projectRef":"string or null","projectTitle":"string or null","calcBy":"string or null","summary":"3-4 sentences"}`
+
+    const synthRaw = await claudeCall(SYNTHESIS_SYSTEM, synthContent, 1000)
+    const synthesis = safeParseJSON(synthRaw, {
+      projectRef: null, projectTitle: null, calcBy: null,
+      summary: `Review complete. ${allFinal.length} item(s) identified.`
+    })
+
+    // ── Deduplicate ────────────────────────────────────────────────────────────
+    const seen = new Set()
+    const deduped = allFinal.filter(c => {
+      const key = `${c.member}|${c.title}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+
+    // Store result on the job — client polls status endpoint to retrieve it
+    const job = reviewJobs.get(jobId)
+    if (job) {
+      job.status = 'complete'
+      job.progress = 'Complete'
+      job.result = {
+        projectRef: synthesis.projectRef,
+        projectTitle: synthesis.projectTitle,
+        calcBy: synthesis.calcBy,
+        summary: synthesis.summary,
+        comments: deduped,
+      }
+      console.log(`[${jobId}] Review complete — ${deduped.length} comments`)
+    }
+
+  } catch (err) {
+    console.error(`[${jobId}] /api/check-package error:`, err)
+    const job = reviewJobs.get(jobId)
+    if (job) {
+      job.status = 'error'
+      job.error = err.message || 'Unknown error'
+    }
+  }
+}
+
+// (end of runReviewJob function)
+
+
+// ── PDF report generator ─────────────────────────────────────────────────────
+app.post('/api/check-package/report', async (req, res) => {
+  const { results, calcFilename, drawingFilename } = req.body
+  if (!results) return res.status(400).json({ error: 'No results provided' })
+
+  try {
+    const MARGIN = 50
+    const PAGE_W = 595
+    const CONTENT_W = PAGE_W - MARGIN * 2  // 495
+    const PURPLE = '#5B2D8E'
+    const GREY = '#6B7280'
+    const LIGHT_GREY = '#E5E7EB'
+    const SEV = {
+      critical: { label: 'CRITICAL', color: '#DC2626', bg: '#FEF2F2', border: '#FECACA' },
+      major:    { label: 'MAJOR',    color: '#EA580C', bg: '#FFF7ED', border: '#FED7AA' },
+      minor:    { label: 'MINOR',    color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
+      query:    { label: 'QUERY',    color: '#2563EB', bg: '#EFF6FF', border: '#BFDBFE' },
+      pass:     { label: 'PASS',     color: '#16A34A', bg: '#F0FDF4', border: '#BBF7D0' },
+    }
+
+    const doc = new PDFDocument({ margin: MARGIN, size: 'A4', bufferPages: true })
+    const chunks = []
+    doc.on('data', c => chunks.push(c))
+
+    // ── helpers ────────────────────────────────────────────────────────────
+    const ensureSpace = (needed) => {
+      if (doc.y + needed > 780) doc.addPage()
+    }
+
+    const hRule = (color = LIGHT_GREY, weight = 0.5) => {
+      doc.moveTo(MARGIN, doc.y).lineTo(PAGE_W - MARGIN, doc.y)
+        .strokeColor(color).lineWidth(weight).stroke()
+      doc.moveDown(0.4)
+    }
+
+    const sectionHeading = (text) => {
+      doc.moveDown(0.3)
+      doc.fontSize(10).font('Helvetica-Bold').fillColor(PURPLE).text(text.toUpperCase(), MARGIN, doc.y, { width: CONTENT_W })
+      doc.moveDown(0.2)
+      doc.moveTo(MARGIN, doc.y).lineTo(PAGE_W - MARGIN, doc.y).strokeColor(PURPLE).lineWidth(1).stroke()
+      doc.moveDown(0.4)
+    }
+
+    // ── PAGE HEADER ─────────────────────────────────────────────────────────
+    // Purple bar at top
+    doc.rect(0, 0, PAGE_W, 36).fill(PURPLE)
+    doc.fontSize(14).font('Helvetica-Bold').fillColor('white')
+      .text('ARX Engineers Ltd', MARGIN, 11, { width: CONTENT_W / 2 })
+    doc.fontSize(9).font('Helvetica').fillColor('rgba(255,255,255,0.7)')
+      .text('Structural Review Note', MARGIN, 23, { width: CONTENT_W / 2 })
+    doc.fontSize(9).font('Helvetica').fillColor('white')
+      .text('Aim For Excellence', MARGIN, 17, { width: CONTENT_W, align: 'right' })
+
+    doc.y = 52
+
+    // Project info block
+    const projectLine = [results.projectRef, results.projectTitle].filter(Boolean).join('  —  ')
+    if (projectLine) {
+      doc.fontSize(13).font('Helvetica-Bold').fillColor('#1A1A1A')
+        .text(projectLine, MARGIN, doc.y, { width: CONTENT_W })
+      doc.moveDown(0.3)
+    }
+
+    const dateStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })
+    doc.fontSize(8).font('Helvetica').fillColor(GREY)
+    if (results.calcBy) doc.text(`Calc by: ${results.calcBy}     Review date: ${dateStr}`, MARGIN, doc.y, { width: CONTENT_W })
+    else doc.text(`Review date: ${dateStr}`, MARGIN, doc.y, { width: CONTENT_W })
+    doc.moveDown(0.2)
+    if (calcFilename) doc.text(`Calculations: ${calcFilename}`, MARGIN, doc.y, { width: CONTENT_W })
+    if (drawingFilename) doc.text(`Drawings: ${drawingFilename}`, MARGIN, doc.y, { width: CONTENT_W })
+    doc.moveDown(0.5)
+    hRule(LIGHT_GREY, 0.5)
+
+    // ── SUMMARY OF FINDINGS (stat boxes) ────────────────────────────────────
+    sectionHeading('Summary of Findings')
+
+    const comments = results.comments || []
+    const counts = { critical: 0, major: 0, minor: 0, query: 0, pass: 0 }
+    comments.forEach(c => { if (counts[c.severity] !== undefined) counts[c.severity]++ })
+
+    // Draw 5 stat boxes side by side
+    const boxW = 89
+    const boxH = 44
+    const boxGap = 6
+    let bx = MARGIN
+    const by = doc.y
+
+    Object.entries(SEV).forEach(([key, sev]) => {
+      const count = counts[key]
+      // Box background
+      doc.roundedRect(bx, by, boxW, boxH, 4).fill(sev.bg)
+      doc.roundedRect(bx, by, boxW, boxH, 4).stroke(sev.border).lineWidth(0.5)
+      // Count
+      doc.fontSize(22).font('Helvetica-Bold').fillColor(sev.color)
+        .text(String(count), bx + 8, by + 5, { width: boxW - 16, align: 'center' })
+      // Label
+      doc.fontSize(7.5).font('Helvetica-Bold').fillColor(sev.color)
+        .text(sev.label, bx + 4, by + 30, { width: boxW - 8, align: 'center' })
+      bx += boxW + boxGap
+    })
+
+    doc.y = by + boxH + 14
+
+    // ── REVIEW SUMMARY ───────────────────────────────────────────────────────
+    if (results.summary) {
+      sectionHeading('Review Summary')
+      doc.fontSize(9.5).font('Helvetica').fillColor('#374151')
+        .text(results.summary, MARGIN, doc.y, { width: CONTENT_W, lineGap: 2 })
+      doc.moveDown(0.6)
+    }
+
+    // ── DETAILED COMMENTS ────────────────────────────────────────────────────
+    sectionHeading('Detailed Comments')
+
+    const sevOrder = ['critical', 'major', 'minor', 'query', 'pass']
+    const sorted = [...comments].sort((a, b) =>
+      sevOrder.indexOf(a.severity) - sevOrder.indexOf(b.severity)
+    )
+
+    sorted.forEach((c, idx) => {
+      const sev = SEV[c.severity] || SEV.query
+
+      // Estimate height needed: header ~20, title ~16, detail ~varies, rec ~varies
+      const detailLines = Math.ceil((c.detail || '').length / 90)
+      const recLines = c.recommendation ? Math.ceil(c.recommendation.length / 90) : 0
+      const estHeight = 20 + 18 + (detailLines * 12) + (recLines ? 12 + recLines * 12 : 0) + 20
+
+      ensureSpace(estHeight)
+
+      const cardTop = doc.y
+      const cardX = MARGIN
+
+      // Left severity stripe (4px wide)
+      doc.rect(cardX, cardTop, 4, estHeight).fill(sev.color)
+
+      // Card background
+      doc.rect(cardX + 4, cardTop, CONTENT_W - 4, estHeight).fill(sev.bg)
+
+      // Header row: severity badge + member + clause
+      let headerY = cardTop + 7
+      doc.fontSize(7.5).font('Helvetica-Bold').fillColor('white')
+      // Severity badge
+      const badgeW = doc.widthOfString(sev.label) + 10
+      doc.roundedRect(cardX + 10, headerY - 2, badgeW, 13, 2).fill(sev.color)
+      doc.text(sev.label, cardX + 15, headerY, { lineBreak: false })
+
+      let headerX = cardX + 10 + badgeW + 6
+      if (c.member) {
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#1A1A1A')
+          .text(c.member, headerX, headerY, { lineBreak: false })
+        headerX += doc.widthOfString(c.member) + 6
+      }
+      if (c.clause) {
+        doc.fontSize(7.5).font('Helvetica').fillColor(GREY)
+          .text(c.clause, headerX, headerY, { width: cardX + CONTENT_W - headerX - 8, lineBreak: false })
+      }
+
+      // Title
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor('#1A1A1A')
+        .text(c.title || '', cardX + 10, cardTop + 22, { width: CONTENT_W - 20 })
+
+      // Detail
+      doc.moveDown(0.2)
+      doc.fontSize(8.5).font('Helvetica').fillColor('#374151')
+        .text(c.detail || '', cardX + 10, doc.y, { width: CONTENT_W - 20, lineGap: 1.5 })
+
+      // Recommendation box
+      if (c.recommendation) {
+        doc.moveDown(0.3)
+        const recY = doc.y
+        doc.rect(cardX + 10, recY, CONTENT_W - 20, 1).fill('#D1D5DB') // thin rule
+        doc.moveDown(0.25)
+        doc.fontSize(7.5).font('Helvetica-Bold').fillColor(sev.color)
+          .text('ACTION: ', cardX + 10, doc.y, { lineBreak: false })
+        doc.fontSize(8).font('Helvetica').fillColor('#374151')
+          .text(c.recommendation, cardX + 10 + doc.widthOfString('ACTION: ') + 2, doc.y - doc.currentLineHeight(), { width: CONTENT_W - 20 - doc.widthOfString('ACTION: ') - 4, lineGap: 1.5 })
+      }
+
+      doc.y = cardTop + estHeight + 6
+      if (doc.y > 750) doc.addPage()
+    })
+
+    // ── FOOTER on each page ─────────────────────────────────────────────────
+    const totalPages = doc.bufferedPageRange().count
+    for (let i = 0; i < totalPages; i++) {
+      doc.switchToPage(i)
+      doc.fontSize(7).font('Helvetica').fillColor(GREY)
+        .text(
+          `ARX Engineers Ltd  |  Co. No. 16198467  |  www.arxengineers.co.uk  |  AI-assisted review — does not replace engineer judgement  |  Page ${i + 1} of ${totalPages}`,
+          MARGIN, 820, { width: CONTENT_W, align: 'center' }
+        )
+    }
+
+    doc.end()
+    await new Promise(resolve => doc.on('end', resolve))
+
+    const pdfBuffer = Buffer.concat(chunks)
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${results.projectRef || 'ARX'} - Structural Review Note.pdf"`,
+      'Content-Length': pdfBuffer.length,
+    })
+    res.send(pdfBuffer)
+
+  } catch (err) {
+    console.error('/api/check-package/report error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// ── Serve built frontend in production ──────────────────────────
+if (isProd) {
+  const distPath = path.join(__dirname, 'dist')
+  app.use(express.static(distPath))
+  app.get('*splat', (_req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'))
+  })
+}
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`ARX server running on port ${PORT}`)
+})
