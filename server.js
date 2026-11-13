@@ -318,9 +318,15 @@ const styleMap = [
     "p[style-name='heading 1'] => h1:fresh",
     "p[style-name='heading 2'] => h2:fresh",
     "p[style-name='heading 3'] => h3:fresh",
-    // Confirmed Tedds paragraph styles — verified from ARX26060 Deploy Logs, 12 Aug 2026
-    "p[style-name='Calcreference'] => h1:fresh",
-    "p[style-name='Calc Title'] => h1:fresh",
+    // Tedds for Word — only ONE style is the member boundary.
+    // Verified empirically against ARX26103 (Nov 2026) — isolating each candidate:
+    //   'Calc Section'         → 40 headings: "RIDGE BEAM RB-1", "BEAM B-6", "beam b-1"  ✓
+    //   'Calc Title'           → 39 headings: Tedds library titles ("Steel beam analysis…")  ✗
+    //   'Calc Heading'         → 19 headings: sub-sections ("Consider Combination 5")       ✗
+    //   'Calcreference'        → Tedds calc version stamps                                  ✗
+    //   'Calc Preview Heading' → summary-table headings                                     ✗
+    //   'Calc Subheading'      → fires on every sub-step (polluting)                        ✗
+    "p[style-name='Calc Section'] => h1:fresh",
 ]
 
   const htmlResult = await mammoth.convertToHtml({ buffer }, { styleMap })
@@ -349,23 +355,32 @@ const styleMap = [
   }
   console.log(`Style-map strategy found ${htmlHeadings.length} headings`)
 
-  // Strategy 2: regex on raw text keyed on Tedds/ARX section-header patterns
+  // Strategy 2: regex on raw text keyed on Tedds/ARX section-header patterns.
+  // Case-INSENSITIVE (flag 'i') because Tedds output mixes cases — verified against
+  // ARX26103: real headings include "RIDGE BEAM RB-1", "Rafters R-1", "Roof joist RJ-1",
+  // "Column C-4 (C-5 similar)", "beam b-1", "bEAM B-2", "FLOOR JOIST FJ-1".
+  // Member prefixes are 1–3 letters (RB, VB, FJ, RJ, CJ, HR, TR, CD, PS, B, L, C, P, R).
   const TEDDS_HEADING_RE_GLOBAL = new RegExp([
-    // Member type + ref: BEAM B-1, LINTEL L-2, COLUMN C-1, POST P-1, RAFTER R-1
-    '^(BEAM|LINTEL|COLUMN|POST|RAFTER|JOIST|WALL|SLAB|PLATE|PIER|STUD|TIE)\\s+[A-Z]+-?\\d+.*$',
-    // Frame sections: FRAME 1: BEAM B-3 & COLUMN C-1
-    '^FRAME\\s+\\d+\\s*[:.].*$',
+    // Compound-word prefix + ref: RIDGE BEAM RB-1, ROOF JOIST RJ-1, FLOOR JOIST FJ-1,
+    // VALLEY BEAM VB-1, HIP RAFTER HR-1, CEILING JOIST CJ-1, TRIMMER JOIST TR-1
+    '^(RIDGE\\s+BEAM|ROOF\\s+JOIST|FLOOR\\s+JOIST|CEILING\\s+JOIST|VALLEY\\s+BEAM|HIP\\s+RAFTER|TRIMMER\\s+JOIST|PADSTONE|CONNECTION\\s+DETAIL)\\s+[A-Z]{1,3}-?\\d+.*$',
+    // Single-word prefix + ref: BEAM B-1, LINTEL L-2, COLUMN C-1, POST P-1, RAFTER R-1,
+    // RAFTERS R-2 (plural), JOIST J-1, WALL W-1 etc.
+    '^(BEAM|BEAMS|LINTEL|LINTELS|COLUMN|COLUMNS|POST|POSTS|RAFTER|RAFTERS|JOIST|JOISTS|WALL|SLAB|PLATE|PIER|STUD|TIE|TRIMMER)\\s+[A-Z]{1,3}-?\\d+.*$',
+    // Frame sections: FRAME 1: BEAM B-3 & COLUMN C-1,  SINGLE STOREY STEEL FRAME: B-3 & C-1
+    '^(SINGLE\\s+STOREY\\s+)?(STEEL\\s+)?FRAME\\s*\\d*\\s*[:.]\\s*.*$',
     // Bearings: B-1 BEARINGS, L-1 BEARINGS
-    '^[A-Z]+-?\\d+\\s+BEARINGS.*$',
-    // Named engineering sections
-    '^(SKETCH FLOOR PLANS|DESIGN LOADINGS|LOADING SUMMARY|MASONRY SIDE PANEL|MASONRY WALL PANEL)$',
-    '^(PAD FOUNDATION|TRENCH FILL FOUNDATION|STRIP FOUNDATION)$',
-    '^(STEEL MASONRY SUPPORT|STEEL COLUMN|STEEL BEAM|STEEL CONNECTION)$',
-    '^(MOMENT CONNECTION|BEAM SPLICE|BASE PLATE|WELDED CONNECTION|BOLTED CONNECTION)$',
-    '^(LATERAL RESTRAINT|BUCKLING CHECK|SHEAR CHECK|DEFLECTION CHECK|POST DESIGN)$',
-    // Cover-page keys: CLIENT: TBC, DESCRIPTION: ..., BRIEF: ...
-    '^(CLIENT|DESCRIPTION|BRIEF|PROJECT|JOB|SECTION)\\s*[:\\-].*$',
-  ].join('|'), 'gm')
+    '^[A-Z]{1,3}-?\\d+\\s+BEARINGS.*$',
+    // Named engineering sections (match whole line exactly)
+    '^(SKETCH\\s+FLOOR\\s+PLANS?|DESIGN\\s+LOADINGS|LOADING\\s+SUMMARY|DEFLECTION\\s+LIMITS|DESCRIPTION\\s+OF\\s+STRUCTURE)\\s*$',
+    '^(MASONRY\\s+(SIDE|WALL)\\s+PANEL)\\s*$',
+    '^(PAD|TRENCH\\s+FILL|STRIP)\\s+FOUNDATION\\s*$',
+    '^(STEEL\\s+(MASONRY\\s+SUPPORT|COLUMN|BEAM|CONNECTION))\\s*$',
+    '^(MOMENT\\s+CONNECTION|BEAM\\s+SPLICE|BASE\\s+PLATE|WELDED\\s+CONNECTION|BOLTED\\s+CONNECTION)\\s*$',
+    '^(POST\\s+DESIGN)\\s*$',
+    // Cover-page keys: CLIENT: ..., DESCRIPTION: ..., BRIEF: ..., ARCHITECT: ...
+    '^(CLIENT|DESCRIPTION|BRIEF|PROJECT|JOB|SECTION|ARCHITECT)\\s*[:\\-].*$',
+  ].join('|'), 'gmi')  // 'i' flag added — handles mixed/lowercase headings
 
   const regexHeadings = []
   let m
@@ -518,29 +533,30 @@ const styleMap = [
 
         const SCHEDULE_EXTRACT_SYSTEM = `You are reviewing structural drawing text extracted from an ARX Engineers Ltd drawing package.
 
-The text was extracted from a Bluebeam-marked PDF via PDF.js annotation extraction, so it may be FRAGMENTED — individual text boxes come out separately and NOT in reading order. You may see something like:
+The text may be one of two kinds:
+A) Standard PDF text (SK drawing with embedded fonts) — reads naturally, in order
+B) Bluebeam annotation extraction — FRAGMENTED, individual text boxes out of order
 
-"B-1"
-"2No. 47x175mm C24 TIMBERS BOLTED TOGETHER"
-"[Annotations]"
-"Text — B-2"
-"Text — 152x152x23 UC"
-
-Reconstruct the member schedule by pairing member references with their nearby section-size descriptions. Look for ANY token that matches these patterns:
-- Beams: B-1, B-2, B-3 ... or B1, B2 ...
+Reconstruct the member schedule by pairing member references with their nearby section-size descriptions. Look for ANY token that matches these prefix patterns (1 to 3 letters + "-" + digits):
+- Beams: B-1, B-2 ...
+- Ridge beams: RB-1, RB-2 ...
+- Valley beams: VB-1, VB-2 ...
 - Rafters: R-1, R-2 ...
-- Joists: FJ-1, FJ-2, CJ-1, HR-1 ...
+- Joists: FJ-1, FJ-2 (floor), RJ-1 (roof), CJ-1 (ceiling), HR-1 (hip rafter), TR-1 (trimmer)
 - Lintels: L-1, L-2 ...
-- Columns/Posts: C-1, C-2, P-1, P-2 ...
+- Columns: C-1, C-2 ...
+- Posts: P-1, P-2 ...
 - Padstones: PS-1, PS-2 ...
 - Connection details: CD-1, CD-2 ...
 
-For each, find the associated section size or spec that appears NEAR it in the text (Bluebeam text boxes for a schedule row often sit adjacent to each other in extraction order even if the reading order is jumbled).
+CRITICAL — "REMOVED FROM SCHEME" handling:
+Drawings routinely list members whose status is "REMOVED FROM SCHEME" (meaning the scheme was descoped but the schedule row was kept for traceability). Example: "B-6: REMOVED FROM SCHEME"
+For each such member, set "status" to "removed" and "scheduledSize" to the literal text "REMOVED FROM SCHEME". For live members, set "status" to "active". This is essential for cross-referencing — a calc designing a member marked REMOVED on the drawing is a MAJOR coordination error that must not be hidden.
 
-Be GENEROUS — if a reference like "B-1" appears at all in the drawing text, list it with whatever spec you can associate with it (or empty string if nothing found nearby).
+For "by others" members (e.g. "FJ-1: POSI-JOIST TO BE DESIGNED AND DETAILED BY OTHERS"), set "status" to "by_others" and include the full "by others" wording in scheduledSize. A calc for a by-others member is a less-serious finding (usually just an unnecessary section).
 
 Return ONLY valid JSON, no markdown, no code fences:
-{"members": [{"ref": "B-1", "scheduledSize": "2No. 47x175mm C24", "type": "timber beam"}], "connections": [{"ref": "CD-1", "description": "..."}], "padstones": [{"ref": "PS-1", "description": "..."}]}`
+{"members": [{"ref": "B-1", "scheduledSize": "152x152x23 UC", "type": "steel beam", "status": "active"}, {"ref": "B-6", "scheduledSize": "REMOVED FROM SCHEME", "type": "beam", "status": "removed"}, {"ref": "FJ-1", "scheduledSize": "POSI-JOIST BY OTHERS", "type": "floor joist", "status": "by_others"}], "connections": [{"ref": "CD-1", "description": "..."}], "padstones": [{"ref": "PS-1", "description": "..."}]}`
 
         const scheduleRaw = await claudeCall(SCHEDULE_EXTRACT_SYSTEM,
           `Extract member schedule from this drawing text (may be fragmented / out of reading order):\n\n${drawing.textContent.slice(0, 50000)}`, 3000)
@@ -557,16 +573,23 @@ Return ONLY valid JSON, no markdown, no code fences:
           console.log('Members found:', scheduleData.members.map(m => m.ref).join(', '))
         }
 
-        // Add pass comments for each drawing schedule member (for cross-referencing)
+        // Add pass comments for each drawing schedule member (for cross-referencing).
+        // Status is preserved on the comment so the cross-ref pass can distinguish
+        // active members from "REMOVED FROM SCHEME" and "by others" entries.
         for (const m of (scheduleData.members || [])) {
+          const status = m.status || 'active'
+          const statusNote = status === 'removed' ? ' [REMOVED FROM SCHEME]'
+                           : status === 'by_others' ? ' [BY OTHERS]'
+                           : ''
           allComments.push({
             severity: 'pass',
             member: m.ref,
             clause: null,
-            title: `Drawing schedule entry confirmed: ${m.ref}`,
+            title: `Drawing schedule entry confirmed: ${m.ref}${statusNote}`,
             detail: `Member ${m.ref} found in drawing member schedule: ${m.scheduledSize || '(size not identifiable in extracted text)'}`,
             recommendation: null,
-            _drawingSize: m.scheduledSize, // internal use for cross-ref
+            _drawingSize: m.scheduledSize,  // internal — for cross-ref
+            _drawingStatus: status,         // internal — 'active' | 'removed' | 'by_others'
           })
         }
       }
@@ -595,12 +618,36 @@ Return ONLY valid JSON, no markdown, no code fences:
     // ── PASS 3: Extract explicit member references from calcs ─────────────────
     const EXTRACT_MEMBERS_SYSTEM = `You are reviewing a structural calculation package for ARX Engineers Ltd.
 Extract every explicit member reference ID from the calculations.
-Member references follow patterns like: B-1, B-2, C-1, L-1, FJ-1, RJ-1, TR-1, HR-1, CJ-1, P-1, PS-1, CD-1, R-1 etc.
-Also extract the designed/adopted section size from the conclusion of each member calc.
-Look for conclusion lines like "USE 178x102x19 UB", "ADOPT 47x200 C24 @ 400 c/c", "USE 152x152x37 UC".
-Also extract frame groupings e.g. "Frame 1: Beam B-8 & Column C-1" and list each member separately.
+
+Member reference prefixes (1 to 3 letters, then "-" then digits):
+- B (beam), RB (ridge beam), VB (valley beam)
+- L (lintel)
+- C (column), P (post)
+- R (rafter), HR (hip rafter)
+- FJ (floor joist), RJ (roof joist), CJ (ceiling joist), TR (trimmer joist/rafter)
+- PS (padstone), CD (connection detail)
+
+Also extract the designed/adopted section size from the CONCLUSION of each member calc.
+Look for lines like "USE 178x102x19 UB", "ADOPT 47x200 C24 @ 400 c/c", "PROVIDE 152x152x37 UC".
+
+CRITICAL — "(X similar)" grouping:
+Tedds section headings routinely group members, e.g.:
+- "LINTEL L-1 (L-3 SIMILAR)" — one calc covers BOTH L-1 and L-3
+- "POST P-6 (P-5 & P-4 SIMILAR)" — one calc covers P-4, P-5, P-6
+- "Column C-4 (C-5 similar)" — one calc covers C-4 and C-5
+- "LINTEL L-4 MOMENT CONNECTION (L5 SIMILAR)" — covers L-4 and L-5
+When you see "X similar", "Y SIMILAR", or "(X & Y SIMILAR)", emit a SEPARATE entry for EACH named member with the SAME designedSize and mark the derivatives with "groupedWith": ["<parent ref>"]. The parent itself does not need groupedWith. Normalise references: "L5" means "L-5".
+
+Also extract frame groupings e.g. "SINGLE STOREY STEEL FRAME: B-3 & C-1" and list each member separately.
+
 Return ONLY valid JSON, no markdown:
-{"members": [{"ref": "B-1", "type": "steel beam", "designedSize": "178x102x19 UB", "calcSection": "brief what was checked"}]}`
+{"members": [
+  {"ref": "L-1", "type": "lintel", "designedSize": "L1/S 100 standard duty lintel", "calcSection": "lintel design"},
+  {"ref": "L-3", "type": "lintel", "designedSize": "L1/S 100 standard duty lintel", "calcSection": "lintel design", "groupedWith": ["L-1"]},
+  {"ref": "P-6", "type": "steel post", "designedSize": "100x100x6.3 SHS", "calcSection": "post design"},
+  {"ref": "P-5", "type": "steel post", "designedSize": "100x100x6.3 SHS", "calcSection": "post design", "groupedWith": ["P-6"]},
+  {"ref": "P-4", "type": "steel post", "designedSize": "100x100x6.3 SHS", "calcSection": "post design", "groupedWith": ["P-6"]}
+]}`
 
     let calcMembers = []
     if (calc && calcHeadingChunks && calcHeadingChunks.length > 0) {
@@ -617,46 +664,80 @@ Return ONLY valid JSON, no markdown:
     if (calc && drawing && calcMembers.length > 0) {
       const XREF_SYSTEM = `You are cross-referencing structural calculations against structural drawings for ARX Engineers Ltd.
 
-You will be given:
-1. A list of member references extracted from the calculations with their designed section sizes
-2. Member references identified from the drawing review
+You will be given, for each member:
+- Calc-side: designed section size (or "size not found" if calc didn't name one)
+- Drawing-side: scheduled section size AND status ("active", "removed", "by_others", or "missing")
+
+Finding categories — use these exact severities:
+
+CRITICAL — report when calc effort is wasted on a descoped member:
+- Member is "removed" on drawing but has a calc entry. Example: "Calc designs B-6 as 406x178x67 UB but drawing schedule shows B-6 as REMOVED FROM SCHEME. Resolve: remove the B-6 calc section OR reinstate B-6 on the drawing."
+
+MAJOR — true coordination gaps:
+- Drawing member is "active" but no calc entry. Example: "Drawing lists C-2 as 203x203x46 UC with no corresponding calc — member is undesigned."
+- Calc member has no drawing entry at all (status "missing"). Example: "Calc designs VB-1 but no entry on drawing schedule."
+- Size MISMATCH between calc and drawing for an active member: calc says X, drawing says Y.
+
+MINOR — housekeeping only:
+- Calc exists for a "by_others" drawing member (usually an unnecessary calc section, not a safety issue).
+
+PASS — note for the record:
+- Calc designed size matches drawing scheduled size for an active member.
+
+Grouping: a calc member marked groupedWith:["X"] shares its design with X. Cross-reference each separately against the drawing; if the parent matches but a derivative is missing, flag only the derivative.
 
 Rules:
-- Match EXACT reference IDs only: B-1 in calcs must match B-1 in drawings. Do not guess.
-- If a calc has B-1 designed as 178x102x19 UB but the drawing shows B-1 as 152x89x16 UB, that is a MAJOR discrepancy.
-- If a calc member (e.g. C-3) has no corresponding drawing entry, flag as MAJOR — calc member not shown on drawings.
-- If a drawing member has no corresponding calc, flag as MAJOR — undesigned member on drawings.
-- If a frame grouping in calcs says "Frame 1: B-8 & C-1", check B-8 and C-1 individually.
-- Do not invent matches. Only report what you can confirm or flag as missing.
+- Match EXACT reference IDs: B-1 in calcs must match B-1 in drawings. Do not guess partial matches.
+- Normalise references: "L5" in calcs means "L-5" on the drawing.
+- Do not invent matches. Report what you can confirm or flag as missing.
 
 Return ONLY valid JSON, no markdown:
-{"comments": [{"severity": "critical|major|minor|query", "member": "exact ref e.g. B-1", "clause": null, "title": "concise title under 12 words", "detail": "state exact calc size and drawing size or note which is missing", "recommendation": "specific action"}]}`
+{"comments": [{"severity": "critical|major|minor|query|pass", "member": "exact ref e.g. B-1", "clause": null, "title": "concise title under 12 words", "detail": "state exact calc size and drawing size/status, or note which is missing", "recommendation": "specific action"}]}`
 
-      const drawingMemberRefs = allComments
-        .filter(c => c.member && /^[A-Z]{1,3}-?\d/.test(c.member))
-        .map(c => c.member)
-        .filter((v, i, a) => a.indexOf(v) === i)
-
-      // Build drawing schedule map from pass comments that have _drawingSize
+      // Build drawing schedule map with status from pass comments
       const drawingSchedule = {}
       allComments
         .filter(c => c._drawingSize && c.member)
-        .forEach(c => { drawingSchedule[c.member] = c._drawingSize })
+        .forEach(c => {
+          drawingSchedule[c.member] = {
+            size: c._drawingSize,
+            status: c._drawingStatus || 'active',
+          }
+        })
+
+      // Fallback: any member refs mentioned in drawing comments but not in the formal schedule
+      const scheduleKeys = new Set(Object.keys(drawingSchedule))
+      const drawingMemberRefsOutsideSchedule = allComments
+        .filter(c => c.member && /^[A-Z]{1,3}-?\d/.test(c.member) && !scheduleKeys.has(c.member) && !c._drawingSize)
+        .map(c => c.member)
+        .filter((v, i, a) => a.indexOf(v) === i)
+
+      const formatCalcMember = (m) => {
+        const grouped = m.groupedWith && m.groupedWith.length
+          ? ` [grouped with: ${m.groupedWith.join(', ')}]` : ''
+        return `${m.ref}: ${m.designedSize || 'size not found in calc'} (${m.type || 'member'})${grouped}`
+      }
+
+      const formatDrawingEntry = ([ref, info]) => {
+        const statusTag = info.status === 'removed' ? ' — STATUS: REMOVED FROM SCHEME'
+                        : info.status === 'by_others' ? ' — STATUS: BY OTHERS'
+                        : ''
+        return `${ref}: ${info.size}${statusTag}`
+      }
 
       const xrefContent = `Calc members with designed sizes:
-${calcMembers.map(m => `${m.ref}: ${m.designedSize || 'size not found in calc'} (${m.type || 'structural member'})`).join('\n')}
+${calcMembers.map(formatCalcMember).join('\n')}
 
-Drawing member schedule (extracted directly from drawing text):
+Drawing member schedule (ref: size — status):
 ${Object.keys(drawingSchedule).length > 0
-  ? Object.entries(drawingSchedule).map(([ref, size]) => `${ref}: ${size}`).join('\n')
-  : `No schedule extracted. Member refs seen in drawing review: ${drawingMemberRefs.join(', ') || 'none'}`}
+  ? Object.entries(drawingSchedule).map(formatDrawingEntry).join('\n')
+  : 'No formal schedule extracted.'}
 
-Cross-reference rules:
-- Match EXACT reference IDs: B-1 in calcs must match B-1 in drawing schedule
-- Compare section sizes exactly: flag any discrepancy between calc designed size and drawing scheduled size
-- Flag any calc member with no drawing schedule entry as MAJOR
-- Flag any drawing schedule member with no corresponding calc as MAJOR
-- Do not invent matches or guess`
+${drawingMemberRefsOutsideSchedule.length
+  ? `Additional member refs seen on drawing plan but not in the formal schedule (potential missing schedule entries): ${drawingMemberRefsOutsideSchedule.join(', ')}`
+  : ''}
+
+Apply the severity rules from your system prompt. In particular, flag every CRITICAL where calc exists for a REMOVED member and every MAJOR where an active drawing member has no calc.`
 
       const xrefRaw = await claudeCall(XREF_SYSTEM, xrefContent, 3000)
       const xref = safeParseJSON(xrefRaw, { comments: [] })
@@ -683,14 +764,17 @@ Extract project ref, title, calc author. Write 3-4 sentence summary. Return JSON
       summary: `Review complete. ${allFinal.length} item(s) identified.`
     })
 
-    // ── Deduplicate ────────────────────────────────────────────────────────────
+    // ── Deduplicate and strip internal fields ─────────────────────────────────
     const seen = new Set()
-    const deduped = allFinal.filter(c => {
-      const key = `${c.member}|${c.title}`
-      if (seen.has(key)) return false
-      seen.add(key)
-      return true
-    })
+    const deduped = allFinal
+      .filter(c => {
+        const key = `${c.member}|${c.title}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      // Drop the internal cross-ref fields before returning to the client
+      .map(({ _drawingSize, _drawingStatus, ...rest }) => rest)
 
     // Store result on the job — client polls status endpoint to retrieve it
     const job = reviewJobs.get(jobId)
