@@ -1,6 +1,24 @@
+// Single shared Supabase client used by the whole frontend.
+// Reads VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY from the build-time env.
+// The anon/publishable key is safe to ship in the bundle — it only enables
+// the operations that Row Level Security policies allow on your Supabase tables.
 import { createClient } from '@supabase/supabase-js'
 
-const SUPABASE_URL = 'https://ycdmianhcgiioipdxrkd.supabase.co'
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InljZG1pYW5oY2dpaW9pcGR4cmtkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzOTA5MDAsImV4cCI6MjA5NTk2NjkwMH0.NY4BDWOGwWlGfxDAPCkd8tgotylu3bInRrCeXBHfh5U'
+const url = import.meta.env.VITE_SUPABASE_URL
+const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+if (!url || !anonKey) {
+  // Visible in the browser console on an unconfigured build — easy to diagnose
+  console.error(
+    '[supabase] missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY — ' +
+    'set these as env vars on Railway and redeploy.'
+  )
+}
+
+export const supabase = createClient(url, anonKey, {
+  auth: {
+    persistSession: true,       // keep the session in localStorage across reloads
+    autoRefreshToken: true,     // silently refresh the access token before it expires
+    detectSessionInUrl: true,   // parse ?code= or #access_token= from magic-link redirects
+  },
+})
