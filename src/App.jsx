@@ -9,6 +9,8 @@ import Contacts from './pages/Contacts'
 import Referrals from './pages/Referrals'
 import Tasks from './pages/Tasks'
 import CalcChecker from './pages/CalcChecker'
+import { AuthProvider, useAuth } from './auth/AuthProvider'
+import Login from './auth/Login'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: '⬡' },
@@ -22,7 +24,9 @@ const NAV = [
   { id: 'referrals', label: 'Referrals', icon: '🤝' },
 ]
 
-export default function App() {
+// The original app shell, unchanged except for a signed-in footer with sign-out.
+function Shell() {
+  const { user, signOut } = useAuth()
   const [page, setPage] = useState('dashboard')
 
   const pages = {
@@ -65,7 +69,21 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div style={{ padding: '16px 20px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+        <div style={{ padding: '14px 20px', borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+          <div style={{ color: 'rgba(255,255,255,0.75)', fontSize: 11, fontWeight: 600, marginBottom: 2, wordBreak: 'break-all' }}>
+            {user?.email}
+          </div>
+          <button
+            onClick={() => { if (window.confirm('Sign out of ARX Engineers?')) signOut() }}
+            style={{
+              background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)',
+              fontSize: 11, padding: 0, cursor: 'pointer', textDecoration: 'underline',
+            }}
+          >
+            Sign out
+          </button>
+        </div>
+        <div style={{ padding: '14px 20px', borderTop: '1px solid rgba(255,255,255,0.1)' }}>
           <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 11 }}>Effiom Esua · Director</div>
           <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 10, marginTop: 2 }}>Co. No. 16198467</div>
         </div>
@@ -74,5 +92,33 @@ export default function App() {
         {pages[page]}
       </main>
     </div>
+  )
+}
+
+// Gate: show nothing while loading, Login if no session, Shell if signed in.
+function Gate() {
+  const { loading, session } = useAuth()
+  if (loading) {
+    return (
+      <div style={{
+        minHeight: '100vh', display: 'flex',
+        alignItems: 'center', justifyContent: 'center',
+        background: 'var(--purple-light, #F3EEF9)',
+        color: 'var(--purple-dark, #3D1F6E)',
+        fontFamily: 'Arial, sans-serif', fontSize: 14,
+      }}>
+        Loading…
+      </div>
+    )
+  }
+  if (!session) return <Login />
+  return <Shell />
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <Gate />
+    </AuthProvider>
   )
 }
