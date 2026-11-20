@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url'
 import fs from 'fs'
 import mammoth from 'mammoth'
 import PDFDocument from 'pdfkit'
+import { createClient } from '@supabase/supabase-js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -14,6 +15,60 @@ const isProd = process.env.NODE_ENV === 'production'
 
 app.use(cors())
 app.use(express.json({ limit: '50mb' }))
+
+// ── Supabase Auth: verify sessions on every /api/* call ──────────────────────
+// The service role key has full admin rights, so it stays server-only. We only
+// use it here to verify access tokens presented by the frontend.
+const supabaseAdmin = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+  ? createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_ROLE_KEY,
+      { auth: { persistSession: false, autoRefreshToken: false } }
+    )
+  : null
+
+if (!supabaseAdmin) {
+  console.warn('[auth] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set — API routes will refuse all requests until configured.')
+}
+
+// Allowlist of emails permitted to use the app. Comma-separated env var, e.g.
+//   ALLOWED_EMAILS=effiom@arxengineers.co.uk,effiom@gmail.com
+// Empty allowlist means "nobody authorised" (fail closed) — safer default than
+// "anyone with a valid Supabase account can log in".
+const ALLOWED_EMAILS = (process.env.ALLOWED_EMAILS || '')
+  .split(',')
+  .map(e => e.trim().toLowerCase())
+  .filter(Boolean)
+
+async function requireAuth(req, res, next) {
+  if (!supabaseAdmin) {
+    return res.status(503).json({ error: 'Auth not configured on server' })
+  }
+  const authHeader = req.headers.authorization || ''
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim()
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized: missing token' })
+  }
+  try {
+    const { data, error } = await supabaseAdmin.auth.getUser(token)
+    if (error || !data?.user) {
+      return res.status(401).json({ error: 'Unauthorized: invalid or expired token' })
+    }
+    const email = (data.user.email || '').toLowerCase()
+    if (!ALLOWED_EMAILS.length || !ALLOWED_EMAILS.includes(email)) {
+      console.warn(`[auth] rejected email not on allowlist: ${email}`)
+      return res.status(403).json({ error: 'Forbidden: email not authorised' })
+    }
+    req.user = data.user
+    next()
+  } catch (err) {
+    console.error('[auth] verification error:', err)
+    return res.status(401).json({ error: 'Unauthorized: auth check failed' })
+  }
+}
+
+// Apply auth to EVERY /api/* route — place this BEFORE any route handler below.
+app.use('/api', requireAuth)
 
 // ── Anthropic proxy ──────────────────────────────────────────────
 app.post('/api/claude', async (req, res) => {
