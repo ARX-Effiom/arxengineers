@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from 'react'
+import { apiFetch } from '../lib/apiFetch'
 
 const PURPLE = '#5B2D8E'
 const PURPLE_DARK = '#3D1F6E'
@@ -330,7 +331,7 @@ export default function CalcChecker() {
       setStatus({ type: 'loading', msg: 'Sending to review agent…' })
 
       // POST: kick off the review, get a jobId back immediately
-      const res = await fetch('/api/check-package', {
+      const res = await apiFetch('/api/check-package', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ calc: calcPayload, drawing: drawingPayload }),
@@ -358,7 +359,7 @@ export default function CalcChecker() {
         await new Promise(r => setTimeout(r, POLL_MS))
         let statusRes
         try {
-          statusRes = await fetch(`/api/check-package/status/${jobId}`)
+          statusRes = await apiFetch(`/api/check-package/status/${jobId}`)
         } catch (netErr) {
           // Transient network error — keep polling; container may be restarting
           console.warn('[poll] network error, retrying:', netErr?.message)
@@ -394,7 +395,7 @@ export default function CalcChecker() {
     if (!results) return
     setGeneratingPdf(true)
     try {
-      const res = await fetch('/api/check-package/report', {
+      const res = await apiFetch('/api/check-package/report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ results, calcFilename: calcFile?.name, drawingFilename: drawingFile?.name }),
